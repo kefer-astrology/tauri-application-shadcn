@@ -1,128 +1,139 @@
 <script lang="ts">
   import { layout, type Tab, setMode, showOpenExportOverlay } from '$lib/state/layout';
   import { t } from '$lib/i18n/index.svelte';
-  import { getCurrentWindow } from '@tauri-apps/api/window';
+  import { Button } from '$lib/components/ui/button/index.js';
+  import * as Tooltip from '$lib/components/ui/tooltip/index.js';
+  import { iconMap, type IconId } from '$lib/icons';
+  import Logo from '$lib/icons/Logo.svelte';
+  import { scale } from 'svelte/transition';
+  import { quintOut } from 'svelte/easing';
 
-  let { logoText = 'Kefer' } = $props();
+  type ActionId = 'new' | 'load' | 'save' | 'export' | 'radix' | 'aspects' | 'info' | 'transits' | 'dynamic' | 'revolution' | 'favorite' | 'settings' | 'about';
 
   type Action = {
-    id: 'new' | 'load' | 'export' | 'radix' | 'aspects' | 'transits' | 'settings' | 'about' | 'help' | 'exit';
+    id: ActionId;
     onClick: () => void | Promise<void>;
-    icon: 'doc' | 'folder' | 'download' | 'radix' | 'aspects' | 'transits' | 'gear' | 'info' | 'help' | 'power';
+    group: 'file' | 'view' | 'meta';
   };
 
   function setTab(tab: Tab) {
     layout.selectedTab = tab;
   }
 
-  // Map specific buttons to translation keys provided in JSON
-  function labelKeyFor(id: Action['id']): string {
+  function labelKeyFor(id: ActionId): string {
     switch (id) {
       case 'new': return 'new';
       case 'load': return 'load';
+      case 'save': return 'save';
       case 'export': return 'share';
       case 'transits': return 'transits';
       case 'aspects': return 'aspects';
+      case 'info': return 'info';
       case 'radix': return 'new_type_radix';
+      case 'dynamic': return 'dynamic';
+      case 'revolution': return 'revolution';
+      case 'favorite': return 'favorite';
       case 'settings': return 'settings';
       case 'about': return 'settings_about';
-      case 'exit': return 'exit';
-      default: return id; // fallback to flat keys if present
+      default: return id;
     }
   }
 
   const actions: Action[] = [
-    { id: 'new', onClick: () => { setMode('new_radix'); }, icon: 'doc' },
-    { id: 'load', onClick: () => { showOpenExportOverlay(true); }, icon: 'folder' },
-    { id: 'export', onClick: () => { showOpenExportOverlay(true); }, icon: 'download' },
-    { id: 'radix', onClick: () => { setMode('radix_view'); setTab('Radix'); }, icon: 'radix' },
-    { id: 'aspects', onClick: () => { setMode('radix_table'); setTab('Aspects'); }, icon: 'aspects' },
-    { id: 'transits', onClick: () => { setMode('radix_transits'); setTab('Transits'); }, icon: 'transits' },
-    { id: 'settings', onClick: () => { setMode('settings'); setTab('Settings'); }, icon: 'gear' },
-    { id: 'about', onClick: () => setTab('About'), icon: 'info' },
-    { id: 'help', onClick: () => {/* TODO: implement */}, icon: 'help' },
-    { id: 'exit', onClick: async () => { try { await getCurrentWindow().close(); } catch (e) { console.error(e); } }, icon: 'power' },
+    { id: 'new', onClick: () => { setMode('new_radix'); }, group: 'file' },
+    { id: 'load', onClick: () => { setMode('open'); }, group: 'file' },
+    { id: 'save', onClick: () => { showOpenExportOverlay(true); }, group: 'file' },
+    { id: 'export', onClick: () => { setMode('export'); }, group: 'file' },
+
+    { id: 'radix', onClick: () => { setMode('radix_view'); setTab('Radix'); }, group: 'view' },
+    { id: 'aspects', onClick: () => { setMode('radix_view'); setTab('Aspects'); }, group: 'view' },
+    { id: 'info', onClick: () => { setMode('info'); }, group: 'view' },
+    { id: 'transits', onClick: () => { setMode('radix_transits'); setTab('Transits'); }, group: 'view' },
+    { id: 'dynamic', onClick: () => { setMode('dynamic'); }, group: 'view' },
+    { id: 'revolution', onClick: () => { setMode('revolution'); }, group: 'view' },
+
+    { id: 'favorite', onClick: () => { setMode('favorite'); }, group: 'meta' },
+    { id: 'settings', onClick: () => { setMode('settings'); setTab('Settings'); }, group: 'meta' },
   ];
 
-  function onIconClick(a: Action) {
-    a.onClick();
+  function iconFor(id: ActionId) {
+    return iconMap[id as IconId] ?? iconMap['radix'];
+  }
+
+  function isActive(id: ActionId): boolean {
+    const mode = layout.mode;
+    switch (id) {
+      case 'new': return mode === 'new_radix';
+      case 'load': return mode === 'open';
+      case 'radix': return mode === 'radix_view' && layout.selectedTab === 'Radix';
+      case 'aspects': return mode === 'radix_view' && layout.selectedTab === 'Aspects';
+      case 'transits': return mode === 'radix_transits';
+      case 'info': return mode === 'info';
+      case 'dynamic': return mode === 'dynamic';
+      case 'revolution': return mode === 'revolution';
+      case 'favorite': return mode === 'favorite';
+      case 'settings': return mode === 'settings';
+      case 'export': return mode === 'export';
+      default: return false;
+    }
   }
 </script>
 
-<!-- Top bar: grid with logo 15% width and icons area filling the rest -->
-<div class="w-full h-full grid grid-cols-[15%_auto] items-center px-4">
-  <!-- Logo area -->
-  <div class="h-full flex items-center">
-    <div class="text-xl font-bold tracking-wide select-none text-white">{logoText}</div>
+<!-- Top bar: 12-column grid layout -->
+<div class="w-full h-full grid grid-cols-12 items-center px-2 gap-0 overflow-hidden">
+  <!-- Logo: columns 1-3 -->
+  <div class="col-span-3 h-full flex items-center justify-center py-3">
+    <Logo class="block h-3/4 w-auto text-white" />
   </div>
-  <!-- Icons area only -->
-  <div class="h-full grid content-center">
-    <div class="grid grid-cols-10 gap-2 p-1 place-items-center">
+
+  <!-- Space: column 4 -->
+  <div class="col-span-1"></div>
+
+  <!-- Icons: columns 5-12 (8 columns for 12 icons) -->
+  <Tooltip.Provider>
+    <div class="col-span-8 h-full flex items-center gap-0 overflow-hidden px-2">
       {#each actions as a}
-        <button
-          class="h-12 w-12 flex items-center justify-center rounded-md bg-transparent text-white hover:bg-white/10 transition-colors"
-          onclick={() => onIconClick(a)}
-          aria-label={t(labelKeyFor(a.id))}
-          title={t(labelKeyFor(a.id))}
-        >
-          {#if a.icon === 'doc'}
-            <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-              <path d="M14 2v6h6"/>
-            </svg>
-          {:else if a.icon === 'folder'}
-            <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M3 7h5l2 3h11v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
-            </svg>
-          {:else if a.icon === 'download'}
-            <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-              <path d="M7 10l5 5 5-5"/>
-              <path d="M12 15V3"/>
-            </svg>
-          {:else if a.icon === 'radix'}
-            <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <circle cx="12" cy="12" r="8" />
-              <path d="M12 4v16M4 12h16"/>
-            </svg>
-          {:else if a.icon === 'aspects'}
-            <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M4 6h16M4 12h16M4 18h16"/>
-            </svg>
-          {:else if a.icon === 'transits'}
-            <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M3 3v18h18"/>
-              <path d="M6 15l4-4 3 3 5-5"/>
-            </svg>
-          {:else if a.icon === 'gear'}
-            <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"/>
-              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09c-.66 0-1.26.39-1.51 1z"/>
-            </svg>
-          {:else if a.icon === 'info'}
-            <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <circle cx="12" cy="12" r="10"/>
-              <path d="M12 16v-4"/>
-              <path d="M12 8h.01"/>
-            </svg>
-          {:else if a.icon === 'help'}
-            <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M9 9a3 3 0 1 1 4 2.83c-.9.34-1.5 1.2-1.5 2.17V15"/>
-              <path d="M12 19h.01"/>
-              <circle cx="12" cy="12" r="10"/>
-            </svg>
-          {:else if a.icon === 'power'}
-            <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M12 2v10"/>
-              <path d="M5.5 7a8 8 0 1 0 13 0"/>
-            </svg>
-          {/if}
-        </button>
+        {#key a.id}
+          <div class="relative flex flex-col items-center justify-center flex-1 min-w-0 py-3 px-2">
+            <Tooltip.Root>
+              <Tooltip.Trigger>
+                {#snippet child({ props })}
+                  <Button
+                    {...props}
+                    variant="ghost"
+                    class="h-full w-full aspect-square m-0 !p-0 !px-0 !py-0 !bg-transparent hover:!bg-transparent text-white focus-visible:ring-2 focus-visible:ring-white/30"
+                    aria-label={t(labelKeyFor(a.id))}
+                    onclick={() => a.onClick()}
+                  >
+                    {@const Icon = iconFor(a.id)}
+                    <Icon class="block !h-full !w-full" strokeWidth={2} />
+                  </Button>
+                {/snippet}
+              </Tooltip.Trigger>
+              <Tooltip.Content>
+                {t(labelKeyFor(a.id))}
+              </Tooltip.Content>
+            </Tooltip.Root>
+            {#if isActive(a.id)}
+              <div
+                class="absolute bottom-0 left-1/2 -translate-x-1/2 w-3/4 h-0.5 bg-white rounded-full origin-center"
+                transition:scale={{ duration: 300, easing: quintOut, start: 0 }}
+              ></div>
+            {/if}
+          </div>
+        {/key}
       {/each}
     </div>
-  </div>
+  </Tooltip.Provider>
 </div>
 
 <style>
-  button { min-height: 36px; }
+  :global(header > div) { height: 100%; margin: 0; padding: 0; }
+  :global(header button svg) {
+    width: 100% !important;
+    height: 100% !important;
+  }
+  :global(header) {
+    overflow: hidden;
+  }
 </style>

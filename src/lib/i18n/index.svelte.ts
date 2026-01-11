@@ -28,8 +28,11 @@ export const i18n = $state<{ lang: string; dicts: Dictionaries }>({
 const active = $derived(i18n.dicts[i18n.lang] ?? {});
 
 // t() reads from the current active dict; reactivity flows via $derived above
+// Access 'active' directly to ensure Svelte tracks the dependency
 export function t(key: string, vars?: Record<string, any>, fallback?: string) {
-  const raw = getPath(active, key) ?? active[key];
+  // Access active to ensure reactivity tracking
+  const dict = active;
+  const raw = getPath(dict, key) ?? dict[key];
   if (typeof raw === 'string') return interpolate(raw, vars);
   return fallback ?? key;
 }

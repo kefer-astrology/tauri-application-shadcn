@@ -10,7 +10,8 @@ export default defineConfig({
 	resolve: {
 		alias: {
 			$lib: path.resolve('./src/lib')
-		}
+		},
+		dedupe: ['svelte']
 	},
 	server: {
 		port: 1420,
