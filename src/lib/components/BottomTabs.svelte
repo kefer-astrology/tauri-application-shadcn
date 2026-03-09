@@ -1,9 +1,10 @@
 <script lang="ts">
   import { layout, type ChartData } from '$lib/state/layout';
   import * as Breadcrumb from '$lib/components/ui/breadcrumb/index.js';
+  import { Button } from '$lib/components/ui/button/index.js';
 
   function selectContext(chart: ChartData) {
-    layout.selectedContext = chart.name;
+    layout.selectedContext = chart.id;
   }
 </script>
 
@@ -13,16 +14,17 @@
     <Breadcrumb.List class="flex items-center gap-2 text-white/90 min-w-0">
       {#each layout.contexts as chart, i}
         <Breadcrumb.Item>
-          {#if layout.selectedContext === chart.name}
+          {#if layout.selectedContext === chart.id}
             <Breadcrumb.Page class="px-2 py-1.5 rounded-md text-white font-semibold underline underline-offset-4">{chart.name}</Breadcrumb.Page>
           {:else}
             <Breadcrumb.Link>
               {#snippet child({ props })}
-                <button
+                <Button
                   type="button"
-                  class={`${props.class ?? ''} px-2 py-1.5 rounded-md text-white/90 hover:bg-white/10 transition-colors`}
+                  variant="ghost"
+                  class={`${props.class ?? ''} px-2 py-1.5 rounded-md text-white/90 bg-transparent hover:bg-transparent hover:underline transition-colors`}
                   onclick={() => selectContext(chart)}
-                >{chart.name}</button>
+                >{chart.name}</Button>
               {/snippet}
             </Breadcrumb.Link>
           {/if}

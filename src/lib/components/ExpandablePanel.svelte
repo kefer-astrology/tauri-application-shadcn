@@ -1,11 +1,18 @@
 <script lang="ts">
-  import { createEventDispatcher } from 'svelte';
-  let { title = '', expanded = $bindable(true), editable = true, onEdit = undefined, children = undefined, footer = undefined } = $props();
-  const dispatch = createEventDispatcher<{ toggle: boolean }>();
+  import { Button } from '$lib/components/ui/button/index.js';
+  let {
+    title = '',
+    expanded = $bindable(true),
+    editable = true,
+    onEdit = undefined,
+    onToggle = undefined,
+    children = undefined,
+    footer = undefined,
+  } = $props();
 
   function toggle() {
     expanded = !expanded;
-    dispatch('toggle', expanded);
+    onToggle?.(expanded);
   }
 
   function edit() {
@@ -17,19 +24,19 @@
   <!-- Header: #002e60 background, expander on left, title, then edit icon -->
   <div class="flex items-center justify-between px-3 py-2 select-none" style="background-color:#002e60;color:var(--color-primary-foreground,white)">
     <div class="flex items-center gap-2 min-w-0">
-      <button class="inline-flex h-7 w-7 items-center justify-center rounded-sm hover:opacity-85 transition-opacity" onclick={toggle} aria-label="Toggle panel">
+      <Button variant="ghost" size="icon" class="h-7 w-7 rounded-sm hover:opacity-85 transition-opacity" onclick={toggle} aria-label="Toggle panel">
         {#if expanded}
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m18 15-6-6-6 6"/></svg>
         {:else}
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
         {/if}
-      </button>
+      </Button>
       <div class="font-semibold truncate">{title}</div>
     </div>
     {#if editable}
-      <button class="inline-flex h-7 w-7 items-center justify-center rounded-sm hover:opacity-85 transition-opacity" onclick={edit} aria-label="Edit widget">
+      <Button variant="ghost" size="icon" class="h-7 w-7 rounded-sm hover:opacity-85 transition-opacity" onclick={edit} aria-label="Edit widget">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4Z"/></svg>
-      </button>
+      </Button>
     {/if}
   </div>
 

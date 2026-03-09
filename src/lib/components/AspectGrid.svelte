@@ -1,7 +1,7 @@
 <!-- Aspect Grid Component - Triangular aspect table -->
 <script lang="ts">
   import { effectiveTime } from '$lib/stores/timeNavigation.svelte';
-  import { glyphs } from '$lib/stores/glyphs.svelte';
+  import { getGlyphContent } from '$lib/stores/glyphs.svelte';
   
   // Props
   interface Props {
@@ -38,7 +38,10 @@
     chiron: { degrees: 344, sign: '♓', house: 2 }
   });
   
-  const planets = $derived({ ...defaultPlanets, ...planetPositions });
+  const planets = $derived<Record<string, { degrees: number; sign: string; house?: number }>>({
+    ...defaultPlanets,
+    ...planetPositions
+  });
   
   // Default aspects if not provided
   const defaultAspects = $derived([
@@ -97,17 +100,7 @@
     ) || null;
   }
   
-  // Get glyph content
-  function getGlyphContent(id: string): { type: 'unicode' | 'svg'; content: string } {
-    const glyph = glyphs[id];
-    if (!glyph) return { type: 'unicode', content: '' };
-    
-    const svg = glyph.svg;
-    if (svg.trim().startsWith('<svg') || svg.trim().startsWith('<?xml')) {
-      return { type: 'svg', content: svg };
-    }
-    return { type: 'unicode', content: svg };
-  }
+  let failedGlyphFiles = $state<Record<string, boolean>>({});
   
   // Format orb display
   function formatOrb(orb: number, applying?: boolean): string {
@@ -132,6 +125,20 @@
                 <span class="inline-block w-6 h-6" style="vertical-align: middle;">
                   {@html glyph.content}
                 </span>
+              {:else if glyph.type === 'file'}
+                {#if failedGlyphFiles[`top:${planetId}:${glyph.content}`]}
+                  <span class="text-lg font-medium">{glyph.fallback || planetId.charAt(0).toUpperCase()}</span>
+                {:else}
+                  <img
+                    src={glyph.content}
+                    alt={planetId}
+                    style={`width:${glyph.size}px;height:${glyph.size}px;vertical-align:middle;`}
+                    onerror={() => {
+                      failedGlyphFiles[`top:${planetId}:${glyph.content}`] = true;
+                      failedGlyphFiles = { ...failedGlyphFiles };
+                    }}
+                  />
+                {/if}
               {:else}
                 <span class="text-lg font-medium">
                   {glyph.content || planetId.charAt(0).toUpperCase()}
@@ -151,6 +158,20 @@
                 <span class="inline-block w-6 h-6" style="vertical-align: middle;">
                   {@html fromGlyph.content}
                 </span>
+              {:else if fromGlyph.type === 'file'}
+                {#if failedGlyphFiles[`left:${fromPlanet}:${fromGlyph.content}`]}
+                  <span class="text-lg font-medium">{fromGlyph.fallback || fromPlanet.charAt(0).toUpperCase()}</span>
+                {:else}
+                  <img
+                    src={fromGlyph.content}
+                    alt={fromPlanet}
+                    style={`width:${fromGlyph.size}px;height:${fromGlyph.size}px;vertical-align:middle;`}
+                    onerror={() => {
+                      failedGlyphFiles[`left:${fromPlanet}:${fromGlyph.content}`] = true;
+                      failedGlyphFiles = { ...failedGlyphFiles };
+                    }}
+                  />
+                {/if}
               {:else}
                 <span class="text-lg font-medium">
                   {fromGlyph.content || fromPlanet.charAt(0).toUpperCase()}

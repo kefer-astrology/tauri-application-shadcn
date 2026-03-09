@@ -2,6 +2,7 @@
 <script lang="ts">
   import { glyphs } from '$lib/stores/glyphs.svelte';
   import { getGlyphContent } from '$lib/stores/glyphs.svelte';
+  import { Button } from '$lib/components/ui/button/index.js';
   
   interface Body {
     id: string;
@@ -18,6 +19,7 @@
     selectedBodies = $bindable([]),
     onSelectionChange
   }: Props = $props();
+  let failedGlyphFiles = $state<Record<string, boolean>>({});
   
   // Body definitions organized by category
   const bodyCategories = [
@@ -145,8 +147,9 @@
     <div class="space-y-1">
       <!-- Category header -->
       <div class="flex items-center gap-2">
-        <button
+        <Button
           type="button"
+          variant="ghost"
           class="flex items-center gap-2 hover:opacity-80 transition-opacity"
           onclick={() => toggleCategory(category.name)}
         >
@@ -158,14 +161,16 @@
             onclick={(e) => e.stopPropagation()}
           />
           <span class="font-medium">{category.name}</span>
-        </button>
-        <button
+        </Button>
+        <Button
           type="button"
+          variant="ghost"
+          size="sm"
           class="ml-auto text-xs opacity-60 hover:opacity-100"
           onclick={() => toggleCategory(category.name)}
         >
           {categoryExpanded[category.name] ? '−' : '+'}
-        </button>
+        </Button>
       </div>
       
       <!-- Category bodies -->
@@ -184,6 +189,20 @@
                 <span class="inline-block w-5 h-5" style="vertical-align: middle;">
                   {@html glyph.content}
                 </span>
+              {:else if glyph.type === 'file'}
+                {#if failedGlyphFiles[`${body.id}:${glyph.content}`]}
+                  <span class="text-base">{glyph.fallback || body.id.charAt(0).toUpperCase()}</span>
+                {:else}
+                  <img
+                    src={glyph.content}
+                    alt={body.name}
+                    style={`width:${glyph.size}px;height:${glyph.size}px;vertical-align:middle;`}
+                    onerror={() => {
+                      failedGlyphFiles[`${body.id}:${glyph.content}`] = true;
+                      failedGlyphFiles = { ...failedGlyphFiles };
+                    }}
+                  />
+                {/if}
               {:else}
                 <span class="text-base">
                   {glyph.content || body.id.charAt(0).toUpperCase()}

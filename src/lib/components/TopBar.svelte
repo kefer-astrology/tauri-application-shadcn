@@ -83,7 +83,7 @@
 <div class="w-full h-full grid grid-cols-12 items-center px-2 gap-0 overflow-hidden">
   <!-- Logo: columns 1-3 -->
   <div class="col-span-3 h-full flex items-center justify-center py-3">
-    <Logo class="block h-3/4 w-auto text-white" />
+    <Logo size={1} class="block h-3/4 w-auto text-white" />
   </div>
 
   <!-- Space: column 4 -->

@@ -1,12 +1,17 @@
 <!-- src/lib/components/MiddleContent.svelte -->
 <script lang="ts">
-  import { layout } from '$lib/state/layout';
+  import { layout, getSelectedChart, updateChartComputation, chartDataToComputePayload } from '$lib/state/layout';
   import { t, i18n, setLang } from '$lib/i18n/index.svelte';
   import * as Select from '$lib/components/ui/select/index.js';
+  import { Button } from '$lib/components/ui/button/index.js';
+  import { Input } from '$lib/components/ui/input/index.js';
   import { presets, preset, applyPreset } from '$lib/state/theme.svelte';
   import { showOpenExportOverlay } from '$lib/state/layout';
   import RadixChart from '$lib/components/RadixChart.svelte';
   import AspectGrid from '$lib/components/AspectGrid.svelte';
+  import { effectiveTime, timeNavigation } from '$lib/stores/timeNavigation.svelte';
+  import { getCurrentPositions, queryPositions, type Position } from '$lib/stores/data.svelte';
+  import { invoke } from '@tauri-apps/api/core';
 
   // reactive references using runes
   const tab = $derived(layout.selectedTab);
@@ -69,7 +74,7 @@
   // Toolbar state/actions
   let searchQuery = $state('');
   function openChart() { showOpenExportOverlay(true); }
-  function selectContext(c: string) { layout.selectedContext = c; }
+  function selectContext(id: string) { layout.selectedContext = id; }
 
   // square sizing logic
   let contentEl = $state<HTMLDivElement | undefined>(undefined);
@@ -78,7 +83,8 @@
   function recompute() {
     if (!contentEl) return;
     const rect = contentEl.getBoundingClientRect();
-    const size = Math.floor(Math.min(rect.width, rect.height));
+    // Keep a safety margin so SVG labels never clip at container edges.
+    const size = Math.floor(Math.min(rect.width, rect.height) * 0.99);
     square = size > 0 ? size : 0;
   }
 
@@ -90,15 +96,493 @@
     queueMicrotask(recompute);
     return () => ro.disconnect();
   });
+
+  // Load positions from database for radix chart
+  const selectedChart = $derived(getSelectedChart());
+  const currentTime = $derived(effectiveTime());
+  let loadedPositions = $state<Position[]>([]);
+  let isLoadingPositions = $state(false);
+  let positionError = $state<string | null>(null);
+  
+  // Timestamp navigation state
+  let availableTimestamps = $state<string[]>([]);
+  let currentTimestampIndex = $state<number>(-1);
+  let zoomLevel = $state<number>(1); // 1 = every timestamp, 2 = every 2nd, etc.
+
+  // Convert Position[] to RadixChart format
+  const planetPositions = $derived(() => {
+    const result: Record<string, { degrees: number; sign: string; house?: number }> = {};
+    const signs = ['♈', '♉', '♊', '♋', '♌', '♍', '♎', '♏', '♐', '♑', '♒', '♓'];
+    const defaultBodyOrder = [
+      'sun', 'moon', 'mercury', 'venus', 'mars', 'jupiter', 'saturn', 'uranus', 'neptune', 'pluto',
+      'asc', 'mc', 'ic', 'desc', 'north_node', 'south_node', 'lilith', 'chiron'
+    ];
+    const fullBodyOrder = layout.workspaceDefaults.defaultBodies.length > 0
+      ? layout.workspaceDefaults.defaultBodies
+      : defaultBodyOrder;
+    
+    // Map common object_id variations to standard names
+    const objectIdMap: Record<string, string> = {
+      'true_north_node': 'north_node',
+      'true_south_node': 'south_node',
+      'mean_node': 'north_node',
+      'true_node': 'north_node',
+      'black_moon': 'lilith',
+      'chiron': 'chiron',
+      'asc': 'asc',
+      'desc': 'desc',
+      'mc': 'mc',
+      'ic': 'ic',
+    };
+
+    const addPosition = (rawName: string, rawLongitude: number) => {
+      if (/^house_\d+$/i.test(rawName)) return;
+      const longitude = ((rawLongitude % 360) + 360) % 360;
+      const signIndex = Math.floor(longitude / 30);
+      let planetName = rawName.toLowerCase()
+        .replace(/^planet_/, '')
+        .replace(/^body_/, '')
+        .trim();
+      planetName = objectIdMap[planetName] || planetName;
+      result[planetName] = {
+        degrees: longitude,
+        sign: signs[signIndex] || '♈',
+        house: 1 // TODO: calculate house from position and house cusps
+      };
+    };
+
+    // 1) Primary source: loaded positions (DB/in-memory query)
+    for (const pos of loadedPositions) {
+      addPosition(pos.object_id, pos.longitude);
+    }
+
+    // 2) Secondary source: currently selected chart computed payload
+    const computed = selectedChart?.computed?.positions as Record<string, unknown> | undefined;
+    if (computed) {
+      for (const [name, value] of Object.entries(computed)) {
+        if (result[name]) continue;
+        const longitude = typeof value === 'number'
+          ? value
+          : Number((value as Record<string, unknown>)?.longitude ?? NaN);
+        if (!Number.isNaN(longitude)) {
+          addPosition(name, longitude);
+        }
+      }
+    }
+
+    // Keep deterministic draw order (major objects first)
+    const ordered = Object.fromEntries(
+      Object.entries(result).sort(([a], [b]) => {
+        const ai = fullBodyOrder.indexOf(a);
+        const bi = fullBodyOrder.indexOf(b);
+        if (ai !== -1 || bi !== -1) {
+          if (ai === -1) return 1;
+          if (bi === -1) return -1;
+          return ai - bi;
+        }
+        return a.localeCompare(b);
+      })
+    );
+
+    if (Object.keys(ordered).length === 0) {
+      return {};
+    }
+    
+    console.log('Loaded positions:', loadedPositions.length, 'Mapped to:', Object.keys(ordered));
+    
+    return ordered;
+  });
+
+  // Load all available timestamps when chart changes
+  $effect(() => {
+    (async () => {
+    const chart = selectedChart;
+    
+    if (!chart || !chart.id) {
+      availableTimestamps = [];
+      currentTimestampIndex = -1;
+      return;
+    }
+
+    // In-memory mode (no workspace): use chart dateTime as single timestamp if we have computed data
+    if (!layout.workspacePath) {
+      if (chart.computed?.positions && Object.keys(chart.computed.positions).length > 0 && chart.dateTime) {
+        const dt = chart.dateTime.includes('T') ? chart.dateTime : chart.dateTime.replace(' ', 'T') + 'Z';
+        availableTimestamps = [dt];
+        currentTimestampIndex = 0;
+      } else {
+        availableTimestamps = [];
+        currentTimestampIndex = -1;
+      }
+      return;
+    }
+
+    try {
+      // Query all positions to get all available timestamps
+      // Pass undefined to get ALL timestamps (no date filtering)
+      console.log(`Querying all positions for chart ${chart.id}...`);
+      const allPositions = await queryPositions(chart.id, undefined, undefined, false);
+      
+      console.log(`Query returned ${allPositions.length} total positions for chart ${chart.id}`);
+      
+      if (allPositions.length > 0) {
+        // Extract unique timestamps and sort them
+        // Use original datetime strings from database as-is
+        const timestampSet = new Set<string>();
+        
+        for (const pos of allPositions) {
+          timestampSet.add(pos.datetime);
+        }
+        
+        // Sort timestamps by parsing them as dates (treating database format as UTC if no timezone)
+        const sortedTimestamps = Array.from(timestampSet).sort((a, b) => {
+          // Helper to parse datetime assuming UTC if no timezone specified
+          function parseAsUTC(dt: string): Date {
+            // If format is "YYYY-MM-DD HH:MM:SS" (no timezone), treat as UTC
+            if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/.test(dt)) {
+              return new Date(dt.replace(' ', 'T') + 'Z');
+            }
+            // Otherwise parse normally
+            return new Date(dt);
+          }
+          
+          try {
+            const dateA = parseAsUTC(a);
+            const dateB = parseAsUTC(b);
+            return dateA.getTime() - dateB.getTime();
+          } catch {
+            return a.localeCompare(b);
+          }
+        });
+        
+        availableTimestamps = sortedTimestamps;
+        
+        // Log all unique timestamps found
+        console.log(`Found ${sortedTimestamps.length} unique timestamps for chart ${chart.id}:`, sortedTimestamps);
+        console.log(`Sample positions:`, allPositions.slice(0, 3).map(p => ({ 
+          datetime: p.datetime, 
+          object_id: p.object_id,
+          is_radix: p.is_radix 
+        })));
+        
+        if (sortedTimestamps.length === 1) {
+          console.warn(`⚠️ Only 1 timestamp found for chart ${chart.id}. This means only the radix/base chart is stored.`);
+          console.warn(`To enable time navigation, you need to compute a time series with multiple timestamps.`);
+          console.warn(`Current timestamp: ${sortedTimestamps[0]}`);
+        } else {
+          console.log(`✅ Loaded ${sortedTimestamps.length} unique timestamps for chart ${chart.id}`);
+        }
+        
+        // Find current timestamp index - compare timestamps
+        // Helper to parse datetime assuming UTC if no timezone specified
+        function parseTimestampAsUTC(dt: string): Date {
+          if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/.test(dt)) {
+            return new Date(dt.replace(' ', 'T') + 'Z');
+          }
+          return new Date(dt);
+        }
+        
+        const currentTimeMs = currentTime.getTime();
+        const index = sortedTimestamps.findIndex(ts => {
+          try {
+            const tsDate = parseTimestampAsUTC(ts);
+            // Compare within 1 second tolerance
+            return Math.abs(tsDate.getTime() - currentTimeMs) < 1000;
+          } catch {
+            return false;
+          }
+        });
+        if (index >= 0) {
+          currentTimestampIndex = index;
+          console.log(`Found current timestamp at index ${index}`);
+        } else {
+          // Find nearest timestamp
+          let nearestIndex = 0;
+          let minDiff = Math.abs(parseTimestampAsUTC(sortedTimestamps[0]).getTime() - currentTimeMs);
+          for (let i = 1; i < sortedTimestamps.length; i++) {
+            const diff = Math.abs(parseTimestampAsUTC(sortedTimestamps[i]).getTime() - currentTimeMs);
+            if (diff < minDiff) {
+              minDiff = diff;
+              nearestIndex = i;
+            }
+          }
+          currentTimestampIndex = nearestIndex;
+          console.log(`No exact match, using nearest timestamp at index ${nearestIndex}`);
+          // Update time to match the nearest timestamp (parse as UTC if needed)
+          timeNavigation.currentTime = parseTimestampAsUTC(sortedTimestamps[nearestIndex]);
+        }
+      } else {
+        console.log(`No positions found for chart ${chart.id}`);
+        availableTimestamps = [];
+        currentTimestampIndex = -1;
+      }
+    } catch (error) {
+      console.error('Failed to load timestamps:', error);
+      availableTimestamps = [];
+      currentTimestampIndex = -1;
+    }
+    })();
+  });
+
+  // Sync currentTimestampIndex when time changes externally
+  $effect(() => {
+    if (availableTimestamps.length === 0) return;
+    
+    // Helper to parse datetime assuming UTC if no timezone specified
+    function parseTimestampAsUTC(dt: string): Date {
+      if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/.test(dt)) {
+        return new Date(dt.replace(' ', 'T') + 'Z');
+      }
+      return new Date(dt);
+    }
+    
+    const currentTimeMs = currentTime.getTime();
+    // Find exact or nearest timestamp
+    let index = -1;
+    let minDiff = Infinity;
+    
+    for (let i = 0; i < availableTimestamps.length; i++) {
+      try {
+        const tsDate = parseTimestampAsUTC(availableTimestamps[i]);
+        const diff = Math.abs(tsDate.getTime() - currentTimeMs);
+        if (diff < 1000) {
+          // Exact match (within 1 second)
+          index = i;
+          break;
+        }
+        if (diff < minDiff) {
+          minDiff = diff;
+          index = i;
+        }
+      } catch {
+        continue;
+      }
+    }
+    
+    if (index >= 0) {
+      currentTimestampIndex = index;
+    }
+  });
+
+  // Load positions when chart or time changes
+  $effect(() => {
+    (async () => {
+    const chart = selectedChart;
+    const time = currentTime;
+    
+    if (!chart || !chart.id) {
+      loadedPositions = [];
+      return;
+    }
+
+    isLoadingPositions = true;
+    positionError = null;
+    
+    try {
+      // Load positions for current effective time
+      const positions = await getCurrentPositions(chart.id);
+      loadedPositions = positions;
+    } catch (error) {
+      console.error('Failed to load positions:', error);
+      const errorMessage = error instanceof Error 
+        ? error.message 
+        : typeof error === 'string'
+        ? error
+        : 'Failed to load positions';
+      positionError = `Error: ${errorMessage}`;
+      console.error('Position loading error details:', {
+        chartId: chart?.id,
+        workspacePath: layout.workspacePath,
+        time: time.toISOString(),
+        error
+      });
+      loadedPositions = [];
+    } finally {
+      isLoadingPositions = false;
+    }
+    })();
+  });
+
+  // In-memory mode: compute chart from data when no workspace and chart has dateTime + location but no computed positions
+  $effect(() => {
+    const chart = selectedChart;
+    if (!chart?.id || layout.workspacePath) return;
+    if (!chart.dateTime?.trim() || !chart.location?.trim()) return;
+    if (chart.computed?.positions && Object.keys(chart.computed.positions).length > 0) return;
+    const payload = chartDataToComputePayload(chart);
+    invoke<{ positions?: Record<string, number>; aspects?: unknown[]; chart_id?: string }>('compute_chart_from_data', { chartJson: payload })
+      .then((result) => {
+        updateChartComputation(chart.id, { positions: result.positions ?? {}, aspects: result.aspects ?? [] });
+      })
+      .catch((err) => {
+        console.warn('In-memory compute failed for chart', chart.id, err);
+      });
+  });
+
+  // Workspace mode: compute real positions when chart has no computed payload yet.
+  $effect(() => {
+    const chart = selectedChart;
+    if (!chart?.id || !layout.workspacePath) return;
+    if (chart.computed?.positions && Object.keys(chart.computed.positions).length > 0) return;
+
+    invoke<{ positions?: Record<string, number>; aspects?: unknown[]; chart_id?: string }>('compute_chart', {
+      workspacePath: layout.workspacePath,
+      chartId: chart.id,
+    })
+      .then((result) => {
+        updateChartComputation(chart.id, { positions: result.positions ?? {}, aspects: result.aspects ?? [] });
+      })
+      .catch((err) => {
+        console.warn('Workspace compute failed for chart', chart.id, err);
+      });
+  });
+  
+  // Navigate to next/previous computed timestamp
+  function navigateToTimestamp(direction: 'next' | 'prev') {
+    console.log(`navigateToTimestamp called: direction=${direction}, availableTimestamps.length=${availableTimestamps.length}, currentIndex=${currentTimestampIndex}, zoomLevel=${zoomLevel}`);
+    
+    if (availableTimestamps.length === 0) {
+      console.log('No timestamps available for navigation');
+      return;
+    }
+    
+    if (availableTimestamps.length === 1) {
+      console.log('Only 1 timestamp available, cannot navigate');
+      return;
+    }
+    
+    if (currentTimestampIndex < 0) {
+      console.log('Current timestamp index is invalid:', currentTimestampIndex);
+      // Try to find the current time in available timestamps
+      const currentTimeStr = currentTime.toISOString();
+      const index = availableTimestamps.findIndex(ts => ts === currentTimeStr);
+      if (index >= 0) {
+        currentTimestampIndex = index;
+        console.log(`Found current timestamp at index ${index}`);
+      } else {
+        // Use first timestamp as fallback
+        currentTimestampIndex = 0;
+        console.log('Using first timestamp as fallback');
+      }
+    }
+    
+    const step = zoomLevel;
+    let newIndex = currentTimestampIndex;
+    
+    if (direction === 'next') {
+      newIndex = Math.min(currentTimestampIndex + step, availableTimestamps.length - 1);
+      // If we're at the end, don't navigate
+      if (newIndex === currentTimestampIndex && currentTimestampIndex < availableTimestamps.length - 1) {
+        newIndex = currentTimestampIndex + 1;
+      }
+    } else {
+      newIndex = Math.max(currentTimestampIndex - step, 0);
+      // If we're at the beginning, don't navigate
+      if (newIndex === currentTimestampIndex && currentTimestampIndex > 0) {
+        newIndex = currentTimestampIndex - 1;
+      }
+    }
+    
+    if (newIndex !== currentTimestampIndex && newIndex >= 0 && newIndex < availableTimestamps.length) {
+      currentTimestampIndex = newIndex;
+      const timestamp = availableTimestamps[newIndex];
+      console.log(`Navigating to timestamp ${newIndex + 1}/${availableTimestamps.length}: ${timestamp}`);
+      // Parse timestamp assuming UTC if no timezone specified (database format)
+      function parseTimestampAsUTC(dt: string): Date {
+        if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/.test(dt)) {
+          return new Date(dt.replace(' ', 'T') + 'Z');
+        }
+        return new Date(dt);
+      }
+      timeNavigation.currentTime = parseTimestampAsUTC(timestamp);
+    } else {
+      console.log(`Navigation blocked: newIndex=${newIndex}, currentIndex=${currentTimestampIndex}, total=${availableTimestamps.length}, step=${step}`);
+    }
+  }
+  
+  // Zoom out (increase step size) - skip more timestamps
+  function zoomOut() {
+    const maxZoom = Math.max(1, Math.floor(availableTimestamps.length / 10));
+    zoomLevel = Math.min(zoomLevel * 2, maxZoom);
+  }
+  
+  // Zoom in (decrease step size) - skip fewer timestamps
+  function zoomIn() {
+    zoomLevel = Math.max(1, Math.floor(zoomLevel / 2));
+  }
+  
+  // Keyboard navigation for timestamp navigation (only when Radix tab is active)
+  $effect(() => {
+    // Only enable keyboard navigation when Radix tab is active
+    if (tab !== 'Radix') {
+      return;
+    }
+    
+    function handleKeyDown(e: KeyboardEvent) {
+      // Only handle if not typing in an input/textarea
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
+        return;
+      }
+
+      // Left arrow: navigate to previous computed timestamp
+      if (e.key === 'ArrowLeft' && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
+        e.preventDefault();
+        console.log('ArrowLeft pressed, navigating to previous timestamp');
+        navigateToTimestamp('prev');
+      }
+      // Right arrow: navigate to next computed timestamp
+      else if (e.key === 'ArrowRight' && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
+        e.preventDefault();
+        console.log('ArrowRight pressed, navigating to next timestamp');
+        navigateToTimestamp('next');
+      }
+      // Plus/Equals: zoom in (finer granularity)
+      else if ((e.key === '+' || e.key === '=') && !e.shiftKey) {
+        e.preventDefault();
+        zoomIn();
+      }
+      // Minus/Underscore: zoom out (coarser granularity)
+      else if ((e.key === '-' || e.key === '_') && !e.shiftKey) {
+        e.preventDefault();
+        zoomOut();
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  });
 </script>
 
-<div class="w-full h-full p-4">
-  <div class="h-full w-full rounded-md border border-transparent bg-transparent p-4 flex flex-col">
+<div class="w-full h-full min-h-0 p-2">
+  <div class="h-full w-full min-h-0 rounded-md border border-transparent bg-transparent p-2 flex flex-col overflow-hidden">
     {#if tab === 'Radix'}
       <!-- Radix: Only SVG -->
       <div class="flex-1 min-h-0 flex items-center justify-center" bind:this={contentEl}>
         {#if square > 0}
-          <RadixChart size={square} />
+          {#if isLoadingPositions}
+            <div class="text-sm opacity-60">Loading positions…</div>
+          {:else if positionError}
+            <div class="text-sm text-destructive opacity-80">
+              Error: {positionError}
+            </div>
+          {:else}
+            <div class="relative w-full h-full flex items-center justify-center">
+              <RadixChart size={square} planetPositions={planetPositions()} />
+              <!-- Timestamp navigation indicator -->
+              {#if availableTimestamps.length > 0}
+                <div class="absolute top-2 left-2 text-xs opacity-75 bg-background/80 px-2 py-1 rounded">
+                  {#if availableTimestamps.length === 1}
+                    <span class="text-yellow-500">⚠️ Only 1 timestamp (compute time series to enable navigation)</span>
+                  {:else}
+                    {currentTimestampIndex + 1} / {availableTimestamps.length}
+                    {#if zoomLevel > 1}
+                      <span class="ml-1 opacity-60">(×{zoomLevel})</span>
+                    {/if}
+                  {/if}
+                </div>
+              {/if}
+            </div>
+          {/if}
         {:else}
           <div class="text-sm opacity-60">Measuring available space…</div>
         {/if}
@@ -167,18 +651,18 @@
 
       <!-- Top toolbar: search + open chart button -->
       <div class="flex items-center gap-2 mb-3">
-        <input
+        <Input
           type="text"
           class="h-9 px-3 rounded-md bg-background text-foreground border min-w-[220px]"
           placeholder="Search…"
           bind:value={searchQuery}
         />
-        <button type="button" class="px-3 py-1.5 rounded-md bg-transparent border hover:bg-white/10 text-sm">
+        <Button type="button" variant="outline" class="px-3 py-1.5 text-sm">
           Search
-        </button>
-        <button type="button" class="px-3 py-1.5 rounded-md bg-primary text-primary-foreground text-sm" onclick={openChart}>
+        </Button>
+        <Button type="button" class="px-3 py-1.5 text-sm" onclick={openChart}>
           Open chart
-        </button>
+        </Button>
       </div>
 
       <!-- Example translated strings in non-settings views -->
@@ -193,10 +677,10 @@
         <ul class="space-y-1 max-h-40 overflow-auto pr-1">
           {#each layout.contexts as c}
             <li class="flex items-center justify-between text-sm">
-              <button class="text-left hover:underline" onclick={() => selectContext(c)}>
-                <span class:font-semibold={layout.selectedContext === c}>{c}</span>
-              </button>
-              {#if layout.selectedContext === c}
+              <Button variant="ghost" class="h-auto p-0 text-left hover:underline" onclick={() => selectContext(c.id)}>
+                <span class:font-semibold={layout.selectedContext === c.id}>{c.name}</span>
+              </Button>
+              {#if layout.selectedContext === c.id}
                 <span class="text-xs opacity-70">selected</span>
               {/if}
             </li>

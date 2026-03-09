@@ -6,7 +6,7 @@
   import OpenExportDialog from '$lib/components/OpenExportDialog.svelte';
   import TimeNavigationPanel from '$lib/components/TimeNavigationPanel.svelte';
   import GlyphManager from '$lib/components/GlyphManager.svelte';
-  import { layout, type Mode, addContext, showOpenExportOverlay, loadChartsFromWorkspace, updateChartComputation, getSelectedChart, type ChartData, setMode } from '$lib/state/layout';
+  import { layout, type Mode, showOpenExportOverlay, loadChartsFromWorkspace, updateChartComputation, getSelectedChart, chartDataToComputePayload, type ChartData, setMode, setWorkspaceDefaults } from '$lib/state/layout';
   import { invoke } from '@tauri-apps/api/core';
   import { reapplyCurrentPreset, preset, presets, applyPreset } from '$lib/state/theme.svelte';
   import { timeNavigation } from '$lib/stores/timeNavigation.svelte';
@@ -16,19 +16,24 @@
   import * as Select from '$lib/components/ui/select/index.js';
   import { Button } from '$lib/components/ui/button/index.js';
   import { Input } from '$lib/components/ui/input/index.js';
-  import { getGlyphContent } from '$lib/stores/glyphs.svelte';
+  import { Textarea } from '$lib/components/ui/textarea/index.js';
+  import { getGlyphContent, glyphSettings, glyphSetOptions, setGlyphSet, hardResetGlyphStorage, type GlyphSetId } from '$lib/stores/glyphs.svelte';
   import BodySelector from '$lib/components/BodySelector.svelte';
   import * as Dialog from '$lib/components/ui/dialog/index.js';
   import { onMount } from 'svelte';
+  import { stepForward, stepBackward } from '$lib/stores/timeNavigation.svelte';
 
   let rightExpanded = $state(true);
+  let rightBottomExpanded = $state(true);
   // Left column has three panels with independent states
   let leftTopExpanded = $state(true);
   let leftMiddleExpanded = $state(true);
   // Third panel folded by default
   let leftBottomExpanded = $state(false);
+  let failedGlyphFiles = $state<Record<string, boolean>>({});
 
   const mode = $derived(layout.mode as Mode);
+  const isRadixLikeMode = $derived(mode === 'radix_view' || mode === 'new_radix');
 
   // New Radix form state
   let newChartType = $state<'NATAL' | 'EVENT' | 'HORARY' | 'COMPOSITE'>('NATAL');
@@ -41,11 +46,50 @@
   let newHouseSystem = $state('Placidus');
   let newZodiacType = $state('Tropical');
   let newTags = $state('');
+  let editingChartId = $state<string | null>(null);
   let advancedExpanded = $state<string | undefined>(undefined);
   
   // Open Chart mode state
   let openMode = $state<'my_radixes' | 'database'>('my_radixes');
   let searchQuery = $state('');
+
+  // Bootstrap a real "current sky" chart when app starts with no charts.
+  // This avoids an empty Radix on fresh launch and triggers real computation.
+  $effect(() => {
+    if (layout.contexts.length > 0) return;
+
+    const now = new Date();
+    const nowLocal = new Date(now.getTime() - now.getTimezoneOffset() * 60_000);
+    const dateTime = nowLocal.toISOString().slice(0, 19);
+    const defaultTimezone = layout.workspaceDefaults.timezone || 'UTC';
+    const defaultEngine = layout.workspaceDefaults.engine || 'swisseph';
+    const defaultLat = Number.isFinite(layout.workspaceDefaults.locationLatitude)
+      ? layout.workspaceDefaults.locationLatitude
+      : 0;
+    const defaultLon = Number.isFinite(layout.workspaceDefaults.locationLongitude)
+      ? layout.workspaceDefaults.locationLongitude
+      : 0;
+    const defaultLocationName = layout.workspaceDefaults.locationName || 'Unknown';
+
+    const initialChart: ChartData = {
+      id: 'current-sky',
+      name: 'Current Sky',
+      chartType: 'EVENT',
+      dateTime,
+      // Keep location text numeric so Rust/Python parsers stay deterministic.
+      location: `${defaultLocationName} (${defaultLat.toFixed(4)}, ${defaultLon.toFixed(4)})`,
+      latitude: defaultLat,
+      longitude: defaultLon,
+      timezone: defaultTimezone,
+      houseSystem: layout.workspaceDefaults.houseSystem,
+      zodiacType: layout.workspaceDefaults.zodiacType,
+      engine: defaultEngine,
+      tags: ['auto'],
+    };
+
+    layout.contexts = [initialChart];
+    layout.selectedContext = initialChart.id;
+  });
   
   // Mock data for horoscopes table
   const horoscopes = $state([
@@ -68,6 +112,22 @@
   let transitingBodies = $state<string[]>(['sun', 'moon', 'mercury', 'venus', 'mars', 'jupiter', 'saturn', 'uranus', 'neptune', 'pluto']);
   let transitedBodies = $state<string[]>(['sun', 'moon', 'mercury', 'venus', 'mars', 'jupiter', 'saturn', 'uranus', 'neptune', 'pluto']);
   let selectedAspects = $state<string[]>(['conjunction', 'square', 'trine', 'opposition']);
+  let transitSourceChartId = $state<string>('');
+  let transitLoading = $state(false);
+  let transitError = $state<string | null>(null);
+  type TransitSeriesEntry = {
+    datetime: string;
+    transit_positions?: Record<string, unknown>;
+    aspects?: Array<Record<string, unknown>>;
+  };
+  type TransitSeriesResult = {
+    source_chart_id?: string;
+    time_range?: { start: string; end: string };
+    time_step?: string;
+    results?: TransitSeriesEntry[];
+  };
+  let transitSeries = $state<TransitSeriesEntry[]>([]);
+  let transitMeta = $state<TransitSeriesResult | null>(null);
   
   // Settings mode state
   let selectedSettingsSection = $state<string | undefined>('jazyk');
@@ -81,6 +141,28 @@
         ({ en: 'English', cz: 'Čeština', es: 'Español', fr: 'Français' } as Record<string, string>)[code] ?? code.toUpperCase()
     }))
   );
+
+  $effect(() => {
+    if (!transitSourceChartId && layout.contexts.length > 0) {
+      transitSourceChartId = layout.contexts[0].id;
+    }
+  });
+
+  function stepToSeconds() {
+    const { unit, value } = timeNavigation.step;
+    switch (unit) {
+      case 'seconds':
+        return value;
+      case 'minutes':
+        return value * 60;
+      case 'hours':
+        return value * 60 * 60;
+      case 'days':
+        return value * 60 * 60 * 24;
+      default:
+        return 3600;
+    }
+  }
   let langValue = $state(String(i18n.lang));
   const langTriggerContent = $derived(
     languages.find((l) => l.value === langValue)?.label ?? 'Select language'
@@ -90,6 +172,10 @@
   let presetValue = $state(String(preset.id));
   const presetTriggerContent = $derived(
     presetItems.find((p) => p.value === presetValue)?.label ?? 'Select preset'
+  );
+  let glyphSetValue = $state(String(glyphSettings.activeSet));
+  const glyphSetTriggerContent = $derived(
+    glyphSetOptions.find((s) => s.id === glyphSetValue)?.label ?? 'Select glyph set'
   );
   
   // Sync language changes
@@ -104,6 +190,19 @@
   $effect(() => {
     if (presetValue !== String(preset.id)) {
       applyPreset(presetValue);
+      settingsChanged = true;
+    }
+  });
+
+  $effect(() => {
+    if (glyphSetValue !== glyphSettings.activeSet) {
+      glyphSetValue = glyphSettings.activeSet;
+    }
+  });
+
+  $effect(() => {
+    if (glyphSetValue !== glyphSettings.activeSet && glyphSetOptions.some((s) => s.id === glyphSetValue)) {
+      setGlyphSet(glyphSetValue as GlyphSetId);
       settingsChanged = true;
     }
   });
@@ -160,86 +259,196 @@
     }
   ]);
   
-  // Planet positions for Location table (same as RadixChart default)
+  // Planet positions for right Radix table
   // Get planets from selected chart's computed data, or use defaults
   const selectedChart = $derived(getSelectedChart());
-  const planets = $derived(() => {
-    const computed = selectedChart?.computed?.positions;
-    if (computed) {
-      // Convert positions to planet data format
-      // This is a placeholder - actual conversion depends on Python output format
-      const result: Record<string, { degrees: number; sign: string; house: number }> = {};
-      for (const [name, position] of Object.entries(computed)) {
-        // Assuming position is in degrees (0-360)
-        const degrees = position % 360;
-        const signIndex = Math.floor(degrees / 30);
-        const signs = ['♈', '♉', '♊', '♋', '♌', '♍', '♎', '♏', '♐', '♑', '♒', '♓'];
-        result[name] = {
-          degrees: degrees % 30,
-          sign: signs[signIndex] || '♈',
-          house: 1 // TODO: calculate house from position
-        };
-      }
-      return result;
+  const zodiacSymbols = ['♈', '♉', '♊', '♋', '♌', '♍', '♎', '♏', '♐', '♑', '♒', '♓'];
+  const defaultBodyOrder = [
+    'sun', 'moon', 'mercury', 'venus', 'mars', 'jupiter', 'saturn', 'uranus', 'neptune', 'pluto',
+    'asc', 'mc', 'ic', 'desc', 'north_node', 'south_node', 'lilith', 'chiron'
+  ];
+  const fullBodyOrder = $derived(
+    layout.workspaceDefaults.defaultBodies.length > 0
+      ? layout.workspaceDefaults.defaultBodies
+      : defaultBodyOrder
+  );
+
+  function normalizeLongitude(value: number): number {
+    return ((value % 360) + 360) % 360;
+  }
+
+  function toLongitude(position: unknown): number | null {
+    if (typeof position === 'number') {
+      return normalizeLongitude(position);
     }
-    // Default demo data
-    return {
-      sun: { degrees: 120, sign: '♌', house: 4 },
-      moon: { degrees: 45, sign: '♉', house: 1 },
-      mercury: { degrees: 90, sign: '♋', house: 3 },
-      venus: { degrees: 200, sign: '♏', house: 7 },
-      mars: { degrees: 15, sign: '♈', house: 10 },
-      jupiter: { degrees: 40, sign: '♒', house: 2 },
-      saturn: { degrees: 190, sign: '♒', house: 1 },
-      uranus: { degrees: 260, sign: '♒', house: 3 },
-      neptune: { degrees: 310, sign: '♒', house: 5 },
-      pluto: { degrees: 25, sign: '♒', house: 11 }
-    };
-  });
-  
-  // Chart details (from new chart form or loaded chart)
-  const chartDetails = $derived(() => {
-    const chart = selectedChart;
-    if (chart) {
-      // Parse dateTime - can be ISO format (2025-11-01T23:41:00) or space-separated
-      const dateTimeParts = chart.dateTime.includes('T') 
-        ? chart.dateTime.split('T')
-        : chart.dateTime.split(' ');
-      const date = dateTimeParts[0] || '';
-      const time = dateTimeParts[1]?.split('.')[0] || '';
-      
+    if (position && typeof position === 'object') {
+      const lon = Number((position as Record<string, unknown>).longitude ?? NaN);
+      if (!Number.isNaN(lon)) return normalizeLongitude(lon);
+    }
+    return null;
+  }
+
+  function getHouseCusps(computed: Record<string, unknown>): number[] {
+    const cusps: number[] = [];
+    for (let i = 1; i <= 12; i += 1) {
+      const key = `house_${i}`;
+      const lon = toLongitude(computed[key]);
+      if (lon == null) return [];
+      cusps.push(lon);
+    }
+    return cusps;
+  }
+
+  function locateHouse(longitude: number, cusps: number[]): { house: number; positionInHouse: number } {
+    if (cusps.length !== 12) {
       return {
-        chartType: chart.chartType as 'NATAL' | 'EVENT' | 'HORARY' | 'COMPOSITE',
-        date,
-        time,
-        location: chart.location,
-        latitude: chart.latitude?.toString() || '',
-        longitude: chart.longitude?.toString() || '',
-        timezone: chart.timezone || '',
-        houseSystem: chart.houseSystem || '—',
-        zodiacType: chart.zodiacType || '—',
-        engine: chart.engine || '—',
-        model: chart.model || '—',
-        overrideEphemeris: chart.overrideEphemeris || '—',
-        tags: chart.tags.join(', ')
+        house: Math.floor(longitude / 30) + 1,
+        positionInHouse: longitude % 30,
       };
     }
+
+    for (let i = 0; i < 12; i += 1) {
+      const start = cusps[i];
+      const end = cusps[(i + 1) % 12];
+      const span = ((end - start) + 360) % 360 || 360;
+      const dist = ((longitude - start) + 360) % 360;
+      if (dist <= span) {
+        return {
+          house: i + 1,
+          positionInHouse: dist,
+        };
+      }
+    }
+
     return {
-      chartType: 'NATAL' as 'NATAL' | 'EVENT' | 'HORARY' | 'COMPOSITE',
-      date: '',
-      time: '',
-      location: '',
-      latitude: '',
-      longitude: '',
-      timezone: '',
-      houseSystem: '—',
-      zodiacType: '—',
-      engine: '—',
-      model: '—',
-      overrideEphemeris: '—',
-      tags: ''
+      house: Math.floor(longitude / 30) + 1,
+      positionInHouse: longitude % 30,
+    };
+  }
+
+  const planets = $derived(() => {
+    const computed = selectedChart?.computed?.positions;
+    if (!computed) {
+      return {};
+    }
+
+    const result: Record<string, { longitude: number; sign: string; house: number; positionInHouse: number }> = {};
+    const computedRecord = computed as Record<string, unknown>;
+    const cusps = getHouseCusps(computedRecord);
+    for (const [name, position] of Object.entries(computedRecord)) {
+      if (/^house_\d+$/i.test(name)) continue;
+      const longitude = toLongitude(position);
+      if (longitude == null) continue;
+      const signIndex = Math.floor(longitude / 30);
+      const { house, positionInHouse } = locateHouse(longitude, cusps);
+      result[name] = {
+        longitude,
+        sign: zodiacSymbols[signIndex] || '♈',
+        house,
+        positionInHouse,
+      };
+    }
+
+    const orderedEntries = Object.entries(result).sort(([a], [b]) => {
+      const ai = fullBodyOrder.indexOf(a.toLowerCase());
+      const bi = fullBodyOrder.indexOf(b.toLowerCase());
+      if (ai !== -1 || bi !== -1) {
+        if (ai === -1) return 1;
+        if (bi === -1) return -1;
+        return ai - bi;
+      }
+      return a.localeCompare(b);
+    });
+
+    return Object.fromEntries(orderedEntries);
+  });
+
+  const planetRows = $derived.by(() => {
+    return Object.entries(planets ?? {});
+  });
+  
+  // Chart details for left expander: always show selected chart fields with sensible display defaults
+  const chartDetails = $derived.by(() => {
+    const chart = selectedChart;
+    if (!chart) {
+      return {
+        chartType: 'NATAL' as const,
+        date: '',
+        time: '',
+        location: '',
+        latitude: '',
+        longitude: '',
+        timezone: '',
+        houseSystem: '—',
+        zodiacType: '—',
+        engine: '—',
+        model: '—',
+        overrideEphemeris: '—',
+        tags: '',
+      };
+    }
+    const dateTime = chart.dateTime?.trim() ?? '';
+    const dateTimeParts = dateTime.includes('T')
+      ? dateTime.split('T')
+      : dateTime.split(/\s+/);
+    const date = dateTimeParts[0] ?? '';
+    const timeRaw = (dateTimeParts[1] ?? '').split('.')[0] ?? '';
+    const time = timeRaw.replace(/Z$/i, '').trim();
+    return {
+      chartType: (chart.chartType || 'NATAL') as 'NATAL' | 'EVENT' | 'HORARY' | 'COMPOSITE',
+      date,
+      time,
+      location: chart.location ?? '',
+      latitude: chart.latitude != null ? String(chart.latitude) : '',
+      longitude: chart.longitude != null ? String(chart.longitude) : '',
+      timezone: chart.timezone ?? '',
+      houseSystem: chart.houseSystem && chart.houseSystem.trim() !== '' ? chart.houseSystem : 'Placidus',
+      zodiacType: chart.zodiacType && chart.zodiacType.trim() !== '' ? chart.zodiacType : 'Tropical',
+      engine: chart.engine && chart.engine.trim() !== '' ? chart.engine : '—',
+      model: chart.model && chart.model.trim() !== '' ? chart.model : '—',
+      overrideEphemeris: chart.overrideEphemeris && chart.overrideEphemeris.trim() !== '' ? chart.overrideEphemeris : '—',
+      tags: Array.isArray(chart.tags) ? chart.tags.join(', ') : (chart.tags ?? ''),
     };
   });
+
+  function parseDateTime(dateTime: string) {
+    const trimmed = dateTime?.trim();
+    if (!trimmed) {
+      return { date: '', time: '' };
+    }
+    const parts = trimmed.includes('T') ? trimmed.split('T') : trimmed.split(' ');
+    const date = parts[0] || '';
+    const time = parts[1]?.split('.')[0]?.slice(0, 5) || '';
+    return { date, time };
+  }
+
+  function populateFormFromChart(chart: ChartData) {
+    const { date, time } = parseDateTime(chart.dateTime);
+    newContextName = chart.name;
+    newDate = date;
+    newTime = time;
+    newLocation = chart.location || '';
+    newLatitude = chart.latitude?.toString() || '';
+    newLongitude = chart.longitude?.toString() || '';
+    newHouseSystem = chart.houseSystem || 'Placidus';
+    newZodiacType = chart.zodiacType || 'Tropical';
+    newTags = chart.tags.join(', ');
+    newChartType = chart.chartType as typeof newChartType;
+  }
+
+  function applyFormReset() {
+    newContextName = '';
+    newDate = '';
+    newTime = '';
+    newLocation = '';
+    newLatitude = '';
+    newLongitude = '';
+    newTags = '';
+    newChartType = 'NATAL';
+    newHouseSystem = 'Placidus';
+    newZodiacType = 'Tropical';
+    editingChartId = null;
+  }
   
   // Initialize time navigation when chart is selected
   $effect(() => {
@@ -262,27 +471,127 @@
     }
   });
   
-  function submitNewContext(e?: Event) {
+  function normalizeChartId(name: string): string {
+    return name.trim().toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9_-]/g, '_');
+  }
+
+  function nonEmptyOr(value: string, fallback: string): string {
+    const normalized = value.trim();
+    return normalized.length > 0 ? normalized : fallback;
+  }
+
+  function parseOptionalNumber(value: string): number | undefined {
+    const normalized = value.trim();
+    if (!normalized) return undefined;
+    const num = Number(normalized);
+    return Number.isFinite(num) ? num : undefined;
+  }
+
+  function buildChartFromForm(chartId: string): ChartData {
+    const wsDefaults = layout.workspaceDefaults;
+    const tags = newTags
+      .split(',')
+      .map(tag => tag.trim())
+      .filter(Boolean);
+    const dateTime = [newDate.trim(), newTime.trim()].filter(Boolean).join(' ');
+    const latitude = parseOptionalNumber(newLatitude);
+    const longitude = parseOptionalNumber(newLongitude);
+
+    return {
+      id: chartId,
+      name: newContextName.trim(),
+      chartType: newChartType,
+      dateTime,
+      location: nonEmptyOr(newLocation, wsDefaults.locationName),
+      latitude,
+      longitude,
+      timezone: wsDefaults.timezone,
+      houseSystem: nonEmptyOr(newHouseSystem, wsDefaults.houseSystem),
+      zodiacType: nonEmptyOr(newZodiacType, wsDefaults.zodiacType),
+      engine: wsDefaults.engine,
+      model: null,
+      overrideEphemeris: null,
+      tags,
+    };
+  }
+
+  async function submitNewContext(e?: Event) {
     e?.preventDefault?.();
     const n = newContextName.trim();
     if (!n) return;
-    addContext(n);
-    
-    // Note: chartDetails is now derived from selectedChart
-    // Form data will be saved when creating a new chart via workspace
-    
-    // Reset form
-    newContextName = '';
-    newDate = '';
-    newTime = '';
-    newLocation = '';
-    newLatitude = '';
-    newLongitude = '';
-    newTags = '';
-    newChartType = 'NATAL';
-    newHouseSystem = 'Placidus';
-    newZodiacType = 'Tropical';
+
+    const chartId = editingChartId ?? normalizeChartId(n);
+    const formChart = buildChartFromForm(chartId);
+
+    if (layout.workspacePath) {
+      const payload = chartDataToComputePayload(formChart);
+      try {
+        if (editingChartId) {
+          await invoke<string>('update_chart', {
+            workspacePath: layout.workspacePath,
+            chartId: editingChartId,
+            chart: payload,
+          });
+        } else {
+          await invoke<string>('create_chart', {
+            workspacePath: layout.workspacePath,
+            chart: payload,
+          });
+        }
+      } catch (err) {
+        console.error('Failed to persist chart to workspace:', err);
+        return;
+      }
+    }
+
+    if (editingChartId) {
+      layout.contexts = layout.contexts.map(chart =>
+        chart.id === editingChartId
+          ? { ...chart, ...formChart, id: editingChartId }
+          : chart
+      );
+      layout.selectedContext = editingChartId;
+      layout.selectedTab = 'Radix';
+      setMode('radix_view');
+    } else {
+      if (layout.contexts.some((chart) => chart.id === chartId)) {
+        console.error(`Chart with id ${chartId} already exists in memory`);
+        return;
+      }
+      layout.contexts = [...layout.contexts, formChart];
+      layout.selectedContext = chartId;
+      layout.selectedTab = 'Radix';
+      setMode('radix_view');
+    }
+
+    applyFormReset();
   }
+
+  // Note: Keyboard navigation for timestamp navigation is now handled in MiddleContent.svelte
+  // where the timestamp data is available
+
+  // New mode should always create a fresh chart unless edit mode was explicitly set from Radix view.
+  let prevMode = $state(layout.mode);
+  $effect(() => {
+    const currentMode = layout.mode;
+    const justEnteredNewRadix = currentMode === 'new_radix' && prevMode !== 'new_radix';
+    const justLeftNewRadix = prevMode === 'new_radix' && currentMode !== 'new_radix';
+
+    if (justLeftNewRadix) {
+      // Do not carry edit mode outside the form lifecycle.
+      editingChartId = null;
+    }
+
+    if (justEnteredNewRadix) {
+      // If edit mode wasn't explicitly activated (via Radix view edit action),
+      // start with a clean "new chart" form.
+      if (!editingChartId) {
+        applyFormReset();
+      }
+    }
+
+    prevMode = currentMode;
+  });
 
   // Ensure current preset is applied at app start and when theme class changes externally
   onMount(() => {
@@ -326,7 +635,8 @@
                 {@const chartTypes = [
                   { value: 'NATAL', label: t('new_type_radix', {}, 'Radix') },
                   { value: 'EVENT', label: t('new_type_event', {}, 'Event') },
-                  { value: 'HORARY', label: t('new_type_horary', {}, 'Horary') }
+                  { value: 'HORARY', label: t('new_type_horary', {}, 'Horary') },
+                  { value: 'COMPOSITE', label: t('new_type_composite', {}, 'Composite') }
                 ]}
                 <div class="space-y-3">
                   <div class="text-xs font-medium opacity-75 mb-2">{t('new_type', {}, 'Type')}</div>
@@ -343,13 +653,14 @@
                           {:else}
                             <Breadcrumb.Link>
                               {#snippet child({ props })}
-                                <button
+                                <Button
                                   type="button"
-                                  class={`${props.class ?? ''} px-2 py-1.5 text-sm text-foreground/80 hover:bg-primary hover:text-primary-foreground transition-colors w-full text-left rounded-md`}
+                                  variant="ghost"
+                                  class={`${props.class ?? ''} px-2 py-1.5 text-sm text-foreground/80 bg-transparent hover:bg-transparent hover:underline transition-colors w-full text-left rounded-md`}
                                   onclick={() => newChartType = type.value as typeof newChartType}
                                 >
                                   {type.label}
-                                </button>
+                                </Button>
                               {/snippet}
                             </Breadcrumb.Link>
                           {/if}
@@ -377,13 +688,14 @@
                           {:else}
                             <Breadcrumb.Link>
                               {#snippet child({ props })}
-                                <button
+                                <Button
                                   type="button"
-                                  class={`${props.class ?? ''} px-2 py-1.5 text-sm text-foreground/80 hover:bg-primary hover:text-primary-foreground transition-colors w-full text-left rounded-md`}
+                                  variant="ghost"
+                                  class={`${props.class ?? ''} px-2 py-1.5 text-sm text-foreground/80 bg-transparent hover:bg-transparent hover:underline transition-colors w-full text-left rounded-md`}
                                   onclick={() => openMode = modeItem.value as typeof openMode}
                                 >
                                   {modeItem.label}
-                                </button>
+                                </Button>
                               {/snippet}
                             </Breadcrumb.Link>
                           {/if}
@@ -412,13 +724,14 @@
                           {:else}
                             <Breadcrumb.Link>
                               {#snippet child({ props })}
-                                <button
+                                <Button
                                   type="button"
-                                  class={`${props.class ?? ''} px-2 py-1.5 text-sm text-foreground/80 hover:bg-primary hover:text-primary-foreground transition-colors w-full text-left rounded-md`}
+                                  variant="ghost"
+                                  class={`${props.class ?? ''} px-2 py-1.5 text-sm text-foreground/80 bg-transparent hover:bg-transparent hover:underline transition-colors w-full text-left rounded-md`}
                                   onclick={() => exportType = typeItem.value as typeof exportType}
                                 >
                                   {typeItem.label}
-                                </button>
+                                </Button>
                               {/snippet}
                             </Breadcrumb.Link>
                           {/if}
@@ -435,7 +748,7 @@
                       {@const isExpanded = selectedInfoItem === item.id || item.children.some(c => selectedInfoItem === c.id)}
                       {@const hasSelectedChild = item.children.some(c => selectedInfoItem === c.id)}
                       <div class="space-y-0.5">
-                        <button
+                        <Button
                           type="button"
                           class={`w-full text-left px-2 py-1.5 text-sm rounded-md transition-colors ${
                             hasSelectedChild
@@ -451,11 +764,11 @@
                           }}
                         >
                           {item.label}
-                        </button>
+                        </Button>
                         {#if isExpanded}
                           <div class="pl-4 space-y-0.5">
                             {#each item.children as child}
-                              <button
+                              <Button
                                 type="button"
                                 class={`w-full text-left px-2 py-1 text-xs rounded-md transition-colors ${
                                   selectedInfoItem === child.id
@@ -465,14 +778,14 @@
                                 onclick={() => selectedInfoItem = selectedInfoItem === child.id ? undefined : child.id}
                               >
                                 {child.label}
-                              </button>
+                              </Button>
                             {/each}
                           </div>
                         {/if}
                       </div>
                     {:else}
                       <!-- Single item -->
-                      <button
+                      <Button
                         type="button"
                         class={`w-full text-left px-2 py-1.5 text-sm rounded-md transition-colors ${
                           selectedInfoItem === item.id
@@ -482,89 +795,95 @@
                         onclick={() => selectedInfoItem = selectedInfoItem === item.id ? undefined : item.id}
                       >
                         {item.label}
-                      </button>
+                      </Button>
                     {/if}
                   {/each}
                 </div>
               {:else if mode === 'settings'}
                 <div class="space-y-1 text-sm max-h-full overflow-y-auto pr-1">
                   <!-- Jazyk -->
-                  <button
+                  <Button
                     type="button"
+                    variant="ghost"
                     class={`w-full text-left px-2 py-1.5 text-sm rounded-md transition-colors ${
                       selectedSettingsSection === 'jazyk'
                         ? 'font-semibold underline underline-offset-4 text-foreground bg-primary/10'
-                        : 'text-foreground/80 hover:bg-primary hover:text-primary-foreground'
+                        : 'text-foreground/80 bg-transparent hover:bg-transparent hover:text-foreground hover:underline'
                     }`}
                     onclick={() => selectedSettingsSection = 'jazyk'}
                   >
                     Jazyk
-                  </button>
+                  </Button>
                   
                   <!-- Lokace -->
-                  <button
+                  <Button
                     type="button"
+                    variant="ghost"
                     class={`w-full text-left px-2 py-1.5 text-sm rounded-md transition-colors ${
                       selectedSettingsSection === 'lokace'
                         ? 'font-semibold underline underline-offset-4 text-foreground bg-primary/10'
-                        : 'text-foreground/80 hover:bg-primary hover:text-primary-foreground'
+                        : 'text-foreground/80 bg-transparent hover:bg-transparent hover:text-foreground hover:underline'
                     }`}
                     onclick={() => selectedSettingsSection = 'lokace'}
                   >
                     Lokace
-                  </button>
+                  </Button>
                   
                   <!-- Systém domů -->
-                  <button
+                  <Button
                     type="button"
+                    variant="ghost"
                     class={`w-full text-left px-2 py-1.5 text-sm rounded-md transition-colors ${
                       selectedSettingsSection === 'system_domu'
                         ? 'font-semibold underline underline-offset-4 text-foreground bg-primary/10'
-                        : 'text-foreground/80 hover:bg-primary hover:text-primary-foreground'
+                        : 'text-foreground/80 bg-transparent hover:bg-transparent hover:text-foreground hover:underline'
                     }`}
                     onclick={() => selectedSettingsSection = 'system_domu'}
                   >
                     Systém domů
-                  </button>
+                  </Button>
                   
                   <!-- Nastavení aspektů -->
-                  <button
+                  <Button
                     type="button"
+                    variant="ghost"
                     class={`w-full text-left px-2 py-1.5 text-sm rounded-md transition-colors ${
                       selectedSettingsSection === 'nastaveni_aspektu'
                         ? 'font-semibold underline underline-offset-4 text-foreground bg-primary/10'
-                        : 'text-foreground/80 hover:bg-primary hover:text-primary-foreground'
+                        : 'text-foreground/80 bg-transparent hover:bg-transparent hover:text-foreground hover:underline'
                     }`}
                     onclick={() => selectedSettingsSection = 'nastaveni_aspektu'}
                   >
                     Nastavení aspektů
-                  </button>
+                  </Button>
                   
                   <!-- Vzhled -->
-                  <button
+                  <Button
                     type="button"
+                    variant="ghost"
                     class={`w-full text-left px-2 py-1.5 text-sm rounded-md transition-colors ${
                       selectedSettingsSection === 'vzhled'
                         ? 'font-semibold underline underline-offset-4 text-foreground bg-primary/10'
-                        : 'text-foreground/80 hover:bg-primary hover:text-primary-foreground'
+                        : 'text-foreground/80 bg-transparent hover:bg-transparent hover:text-foreground hover:underline'
                     }`}
                     onclick={() => selectedSettingsSection = 'vzhled'}
                   >
                     Vzhled
-                  </button>
+                  </Button>
                   
                   <!-- Manuál -->
-                  <button
+                  <Button
                     type="button"
+                    variant="ghost"
                     class={`w-full text-left px-2 py-1.5 text-sm rounded-md transition-colors ${
                       selectedSettingsSection === 'manual'
                         ? 'font-semibold underline underline-offset-4 text-foreground bg-primary/10'
-                        : 'text-foreground/80 hover:bg-primary hover:text-primary-foreground'
+                        : 'text-foreground/80 bg-transparent hover:bg-transparent hover:text-foreground hover:underline'
                     }`}
                     onclick={() => selectedSettingsSection = 'manual'}
                   >
                     Manuál
-                  </button>
+                  </Button>
                 </div>
               {:else}
                 <div class="text-sm opacity-85">{t('mode_view_description', { mode: t(mode, {}, mode) }, 'Use the center panel for {mode} view.')}</div>
@@ -573,8 +892,8 @@
                   <ul class="space-y-1 max-h-40 overflow-auto pr-1">
                     {#each layout.contexts as c}
                       <li class="flex items-center justify-between text-sm">
-                        <span class:font-semibold={layout.selectedContext === c}>{c}</span>
-                        {#if layout.selectedContext === c}
+                        <span class:font-semibold={layout.selectedContext === c.id}>{c.name}</span>
+                        {#if layout.selectedContext === c.id}
                           <span class="text-xs opacity-70">{t('selected', {}, 'selected')}</span>
                         {/if}
                       </li>
@@ -598,7 +917,7 @@
                 <label class="block text-sm font-medium opacity-85" for="ctxNameCenter">
                   {t('new_name', {}, 'Name')}
                 </label>
-                <input
+                <Input
                   id="ctxNameCenter"
                   type="text"
                   class="w-full h-9 px-3 rounded-md bg-background text-foreground border"
@@ -613,7 +932,7 @@
                   <label class="block text-sm font-medium opacity-85" for="new-date">
                     {t('new_date', {}, 'Date')}
                   </label>
-                  <input
+                  <Input
                     id="new-date"
                     type="date"
                     class="w-full h-9 px-3 rounded-md bg-background text-foreground border"
@@ -624,7 +943,7 @@
                   <label class="block text-sm font-medium opacity-85" for="new-time">
                     {t('new_time', {}, 'Time')}
                   </label>
-                  <input
+                  <Input
                     id="new-time"
                     type="time"
                     class="w-full h-9 px-3 rounded-md bg-background text-foreground border"
@@ -639,20 +958,20 @@
                   {t('new_location', {}, 'Location')}
                 </label>
                 <div class="flex gap-2">
-                  <input
+                  <Input
                     id="new-location"
                     type="text"
                     class="flex-1 h-9 px-3 rounded-md bg-background text-foreground border"
                     bind:value={newLocation}
                     placeholder={t('new_location_search', {}, 'Search')}
                   />
-                  <button 
+                  <Button 
                     type="button" 
                     class="px-3 py-1.5 rounded-md bg-transparent border hover:bg-white/10 text-sm"
                     title={t('new_location_search', {}, 'Search')}
                   >
                     🔍
-                  </button>
+                  </Button>
                 </div>
               </div>
               
@@ -661,7 +980,7 @@
                 <label class="block text-sm font-medium opacity-85" for="new-tags">
                   {t('new_tags', {}, 'Tags')}
                 </label>
-                <input
+                <Input
                   id="new-tags"
                   type="text"
                   class="w-full h-9 px-3 rounded-md bg-background text-foreground border"
@@ -671,7 +990,7 @@
               </div>
               
               <!-- Advanced Settings -->
-              <Accordion.Root bind:value={advancedExpanded} type="single" collapsible>
+              <Accordion.Root bind:value={advancedExpanded} type="single">
                 <Accordion.Item value="advanced">
                   <Accordion.Trigger class="text-sm font-medium opacity-85">
                     {t('new_advanced', {}, 'Advanced')}
@@ -683,13 +1002,13 @@
                           {t('new_advanced_coords', {}, 'Coords')}
                         </div>
                         <div class="grid grid-cols-2 gap-2">
-                          <input
+                          <Input
                             type="text"
                             class="w-full h-8 px-2 rounded-md bg-background text-foreground border text-xs"
                             placeholder="Latitude"
                             bind:value={newLatitude}
                           />
-                          <input
+                          <Input
                             type="text"
                             class="w-full h-8 px-2 rounded-md bg-background text-foreground border text-xs"
                             placeholder="Longitude"
@@ -701,51 +1020,55 @@
                         <div class="block text-xs font-medium opacity-75">
                           {t('house_system', {}, 'House System')}
                         </div>
-                        <select
-                          class="w-full h-8 px-2 rounded-md bg-background text-foreground border text-xs"
-                          bind:value={newHouseSystem}
-                        >
-                          <option value="Placidus">Placidus</option>
-                          <option value="Whole Sign">Whole Sign</option>
-                          <option value="Campanus">Campanus</option>
-                          <option value="Koch">Koch</option>
-                          <option value="Equal">Equal</option>
-                          <option value="Regiomontanus">Regiomontanus</option>
-                          <option value="Vehlow">Vehlow</option>
-                          <option value="Porphyry">Porphyry</option>
-                          <option value="Alcabitius">Alcabitius</option>
-                        </select>
+                        <Select.Root type="single" bind:value={newHouseSystem}>
+                          <Select.Trigger class="w-full h-8 px-2 text-xs">{newHouseSystem}</Select.Trigger>
+                          <Select.Content>
+                            <Select.Group>
+                              <Select.Item value="Placidus" label="Placidus">Placidus</Select.Item>
+                              <Select.Item value="Whole Sign" label="Whole Sign">Whole Sign</Select.Item>
+                              <Select.Item value="Campanus" label="Campanus">Campanus</Select.Item>
+                              <Select.Item value="Koch" label="Koch">Koch</Select.Item>
+                              <Select.Item value="Equal" label="Equal">Equal</Select.Item>
+                              <Select.Item value="Regiomontanus" label="Regiomontanus">Regiomontanus</Select.Item>
+                              <Select.Item value="Vehlow" label="Vehlow">Vehlow</Select.Item>
+                              <Select.Item value="Porphyry" label="Porphyry">Porphyry</Select.Item>
+                              <Select.Item value="Alcabitius" label="Alcabitius">Alcabitius</Select.Item>
+                            </Select.Group>
+                          </Select.Content>
+                        </Select.Root>
                       </div>
                       <div class="space-y-1">
                         <div class="block text-xs font-medium opacity-75">
                           {t('zodiac_type', {}, 'Zodiac Type')}
                         </div>
-                        <select
-                          class="w-full h-8 px-2 rounded-md bg-background text-foreground border text-xs"
-                          bind:value={newZodiacType}
-                        >
-                          <option value="Tropical">Tropical</option>
-                          <option value="Sidereal">Sidereal</option>
-                        </select>
+                        <Select.Root type="single" bind:value={newZodiacType}>
+                          <Select.Trigger class="w-full h-8 px-2 text-xs">{newZodiacType}</Select.Trigger>
+                          <Select.Content>
+                            <Select.Group>
+                              <Select.Item value="Tropical" label="Tropical">Tropical</Select.Item>
+                              <Select.Item value="Sidereal" label="Sidereal">Sidereal</Select.Item>
+                            </Select.Group>
+                          </Select.Content>
+                        </Select.Root>
                       </div>
                       <div class="space-y-1">
                         <div class="block text-xs font-medium opacity-75">
                           {t('new_advanced_date', {}, 'Date')}
                         </div>
                         <div class="flex gap-2">
-                          <button type="button" class="flex-1 px-2 py-1 text-xs rounded border hover:bg-white/10">
+                          <Button type="button" class="flex-1 px-2 py-1 text-xs rounded border hover:bg-white/10">
                             {t('new_advanced_date_gregorian', {}, 'Gregorian')}
-                          </button>
-                          <button type="button" class="flex-1 px-2 py-1 text-xs rounded border hover:bg-white/10">
+                          </Button>
+                          <Button type="button" class="flex-1 px-2 py-1 text-xs rounded border hover:bg-white/10">
                             {t('new_advanced_date_julian', {}, 'Julian')}
-                          </button>
+                          </Button>
                         </div>
                       </div>
                       <div class="space-y-1">
                         <div class="block text-xs font-medium opacity-75">
                           {t('new_advanced_timezone', {}, 'Timezone')}
                         </div>
-                        <input
+                        <Input
                           type="text"
                           class="w-full h-8 px-2 rounded-md bg-background text-foreground border text-xs"
                           placeholder="UTC offset"
@@ -755,10 +1078,10 @@
                         <div class="block text-xs font-medium opacity-75">
                           {t('new_notes', {}, 'Notes')}
                         </div>
-                        <textarea
-                          class="w-full min-h-20 px-2 py-1 rounded-md bg-background text-foreground border text-xs resize-none"
+                        <Textarea
+                          class="w-full min-h-20 px-2 py-1 text-xs resize-none"
                           placeholder="Additional notes..."
-                        ></textarea>
+                        ></Textarea>
                       </div>
                     </div>
                   </Accordion.Content>
@@ -767,23 +1090,18 @@
               
               <!-- Submit buttons -->
               <div class="flex gap-2 pt-2">
-                <button type="submit" class="px-4 py-2 rounded-md bg-primary text-primary-foreground hover:opacity-90">
-                  {t('add', {}, 'Add')}
-                </button>
-                <button 
+                <Button type="submit" class="px-4 py-2 rounded-md bg-primary text-primary-foreground hover:opacity-90">
+                  {editingChartId ? t('save', {}, 'Save') : t('add', {}, 'Add')}
+                </Button>
+                <Button 
                   type="button" 
                   class="px-4 py-2 rounded-md bg-transparent border hover:bg-white/10"
                   onclick={() => {
-                    newContextName = '';
-                    newDate = '';
-                    newTime = '';
-                    newLocation = '';
-                    newTags = '';
-                    newChartType = 'NATAL';
+                    applyFormReset();
                   }}
                 >
                   {t('clear', {}, 'Clear')}
-                </button>
+                </Button>
               </div>
             </form>
           </div>
@@ -813,6 +1131,32 @@
                               tags: string[];
                             }>;
                           }>('load_workspace', { workspacePath: folderPath });
+
+                          try {
+                            const workspaceDefaults = await invoke<{
+                              default_house_system?: string | null;
+                              default_timezone?: string | null;
+                              default_location_name?: string | null;
+                              default_location_latitude?: number | null;
+                              default_location_longitude?: number | null;
+                              default_engine?: string | null;
+                              default_bodies?: string[] | null;
+                              default_aspects?: string[] | null;
+                            }>('get_workspace_defaults', { workspacePath: folderPath });
+
+                            setWorkspaceDefaults({
+                              houseSystem: workspaceDefaults.default_house_system ?? undefined,
+                              timezone: workspaceDefaults.default_timezone ?? undefined,
+                              locationName: workspaceDefaults.default_location_name ?? undefined,
+                              locationLatitude: workspaceDefaults.default_location_latitude ?? undefined,
+                              locationLongitude: workspaceDefaults.default_location_longitude ?? undefined,
+                              engine: workspaceDefaults.default_engine ?? undefined,
+                              defaultBodies: workspaceDefaults.default_bodies ?? undefined,
+                              defaultAspects: workspaceDefaults.default_aspects ?? undefined,
+                            });
+                          } catch (defaultsErr) {
+                            console.warn('Failed to load workspace defaults, using current defaults:', defaultsErr);
+                          }
                           
                           // Load full chart data to get all settings
                           const charts: ChartData[] = [];
@@ -878,6 +1222,7 @@
                           
                           loadChartsFromWorkspace(charts);
                           layout.workspacePath = workspace.path;
+                          await invoke<string>('init_storage', { workspacePath: workspace.path });
                           
                           // Trigger computation for all charts
                           for (const chart of charts) {
@@ -907,7 +1252,37 @@
                   >
                     {t('open_workspace', {}, 'Open Workspace')}
                   </Button>
-                  <Button 
+                  <Button
+                    variant="outline"
+                    class="px-4 py-2"
+                    onclick={async () => {
+                      try {
+                        if (layout.contexts.length === 0) {
+                          console.warn('No charts to save');
+                          return;
+                        }
+                        let folderPath: string | null = layout.workspacePath;
+                        if (!folderPath) {
+                          folderPath = await invoke<string | null>('open_folder_dialog');
+                        }
+                        if (folderPath) {
+                          const chartsPayload = layout.contexts.map((c) => chartDataToComputePayload(c));
+                          await invoke<string>('save_workspace', {
+                            workspacePath: folderPath,
+                            owner: 'User',
+                            charts: chartsPayload,
+                          });
+                          await invoke<string>('init_storage', { workspacePath: folderPath });
+                          layout.workspacePath = folderPath;
+                        }
+                      } catch (err) {
+                        console.error('Failed to save workspace:', err);
+                      }
+                    }}
+                  >
+                    {t('save_workspace', {}, 'Save Workspace')}
+                  </Button>
+                  <Button
                     variant="outline"
                     class="px-4 py-2"
                     onclick={async () => {
@@ -942,7 +1317,8 @@
                         <tr 
                           class="border-b hover:bg-accent/50 transition-colors cursor-pointer"
                           onclick={() => {
-                            layout.selectedContext = chart.name;
+                            layout.selectedContext = chart.id;
+                            layout.selectedTab = 'Radix';
                             setMode('radix_view');
                           }}
                         >
@@ -992,7 +1368,10 @@
                 <label class="flex items-center gap-3 cursor-pointer group">
                   <input
                     type="checkbox"
-                    bind:checked={exportIncludeLocation}
+                    checked={exportIncludeLocation}
+                    onchange={(event) => {
+                      exportIncludeLocation = (event.currentTarget as HTMLInputElement).checked;
+                    }}
                     class="w-4 h-4 rounded border border-foreground/30 bg-background text-primary focus:ring-2 focus:ring-primary focus:ring-offset-2"
                   />
                   <span class="text-sm opacity-85 group-hover:opacity-100 transition-opacity">
@@ -1003,7 +1382,10 @@
                 <label class="flex items-center gap-3 cursor-pointer group">
                   <input
                     type="checkbox"
-                    bind:checked={exportIncludeAspects}
+                    checked={exportIncludeAspects}
+                    onchange={(event) => {
+                      exportIncludeAspects = (event.currentTarget as HTMLInputElement).checked;
+                    }}
                     class="w-4 h-4 rounded border border-foreground/30 bg-background text-primary focus:ring-2 focus:ring-primary focus:ring-offset-2"
                   />
                   <span class="text-sm opacity-85 group-hover:opacity-100 transition-opacity">
@@ -1014,7 +1396,10 @@
                 <label class="flex items-center gap-3 cursor-pointer group">
                   <input
                     type="checkbox"
-                    bind:checked={exportIncludeInfo}
+                    checked={exportIncludeInfo}
+                    onchange={(event) => {
+                      exportIncludeInfo = (event.currentTarget as HTMLInputElement).checked;
+                    }}
                     class="w-4 h-4 rounded border border-foreground/30 bg-background text-primary focus:ring-2 focus:ring-primary focus:ring-offset-2"
                   />
                   <span class="text-sm opacity-85 group-hover:opacity-100 transition-opacity">
@@ -1073,7 +1458,7 @@
                 <div class="space-y-4 max-w-md">
                   <div class="space-y-2">
                     <div class="block text-sm font-medium opacity-90">Výchozí lokace</div>
-                    <input
+                    <Input
                       type="text"
                       class="w-full h-9 px-3 rounded-md bg-background text-foreground border"
                       placeholder="Zadejte výchozí lokaci..."
@@ -1081,7 +1466,7 @@
                   </div>
                   <div class="space-y-2">
                     <div class="block text-sm font-medium opacity-90">Zeměpisná šířka</div>
-                    <input
+                    <Input
                       type="text"
                       class="w-full h-9 px-3 rounded-md bg-background text-foreground border"
                       placeholder="Latitude"
@@ -1089,7 +1474,7 @@
                   </div>
                   <div class="space-y-2">
                     <div class="block text-sm font-medium opacity-90">Zeměpisná délka</div>
-                    <input
+                    <Input
                       type="text"
                       class="w-full h-9 px-3 rounded-md bg-background text-foreground border"
                       placeholder="Longitude"
@@ -1102,17 +1487,22 @@
                 <div class="space-y-4 max-w-md">
                   <div class="space-y-2">
                     <div class="block text-sm font-medium opacity-90">{t('house_system', {}, 'House System')}</div>
-                    <select class="w-full h-9 px-3 rounded-md bg-background text-foreground border">
-                      <option value="Placidus">Placidus</option>
-                      <option value="Whole Sign">Whole Sign</option>
-                      <option value="Campanus">Campanus</option>
-                      <option value="Koch">Koch</option>
-                      <option value="Equal">Equal</option>
-                      <option value="Regiomontanus">Regiomontanus</option>
-                      <option value="Vehlow">Vehlow</option>
-                      <option value="Porphyry">Porphyry</option>
-                      <option value="Alcabitius">Alcabitius</option>
-                    </select>
+                    <Select.Root type="single" value="Placidus">
+                      <Select.Trigger class="w-full h-9 px-3">Placidus</Select.Trigger>
+                      <Select.Content>
+                        <Select.Group>
+                          <Select.Item value="Placidus" label="Placidus">Placidus</Select.Item>
+                          <Select.Item value="Whole Sign" label="Whole Sign">Whole Sign</Select.Item>
+                          <Select.Item value="Campanus" label="Campanus">Campanus</Select.Item>
+                          <Select.Item value="Koch" label="Koch">Koch</Select.Item>
+                          <Select.Item value="Equal" label="Equal">Equal</Select.Item>
+                          <Select.Item value="Regiomontanus" label="Regiomontanus">Regiomontanus</Select.Item>
+                          <Select.Item value="Vehlow" label="Vehlow">Vehlow</Select.Item>
+                          <Select.Item value="Porphyry" label="Porphyry">Porphyry</Select.Item>
+                          <Select.Item value="Alcabitius" label="Alcabitius">Alcabitius</Select.Item>
+                        </Select.Group>
+                      </Select.Content>
+                    </Select.Root>
                   </div>
                 </div>
               {:else if selectedSettingsSection === 'nastaveni_aspektu'}
@@ -1139,7 +1529,7 @@
                             />
                             <span class="text-sm">{aspect.label}</span>
                           </label>
-                          <input
+                          <Input
                             type="number"
                             class="w-20 h-8 px-2 rounded-md bg-background text-foreground border text-xs"
                             value={aspect.defaultOrb}
@@ -1155,8 +1545,8 @@
               {:else if selectedSettingsSection === 'vzhled'}
                 <!-- Vzhled (Appearance) -->
                 <h3 class="text-sm font-semibold mb-4">Vzhled</h3>
-                <div class="space-y-4 max-w-md">
-                  <div class="space-y-2">
+                <div class="flex flex-wrap items-start gap-6">
+                  <div class="space-y-2 w-full sm:w-auto sm:min-w-[240px]">
                     <label class="block text-sm font-medium opacity-90" for="settings-preset">Color preset</label>
                     <div class="min-w-[220px]">
                       <Select.Root type="single" name="appPreset" bind:value={presetValue}>
@@ -1176,8 +1566,42 @@
                       </Select.Root>
                     </div>
                   </div>
-                  <div class="mt-4">
-                    <GlyphManager />
+                  <div class="space-y-2 w-full sm:w-auto sm:min-w-[240px]">
+                    <label class="block text-sm font-medium opacity-90" for="settings-glyph-set">Glyph image set</label>
+                    <div class="min-w-[220px]">
+                      <Select.Root type="single" name="glyphSet" bind:value={glyphSetValue}>
+                        <Select.Trigger class="w-[220px]" id="settings-glyph-set">
+                          {glyphSetTriggerContent}
+                        </Select.Trigger>
+                        <Select.Content>
+                          <Select.Group>
+                            <Select.Label>Image sets</Select.Label>
+                            {#each glyphSetOptions as setOpt (setOpt.id)}
+                              <Select.Item value={setOpt.id} label={setOpt.label}>
+                                {setOpt.label}
+                              </Select.Item>
+                            {/each}
+                          </Select.Group>
+                        </Select.Content>
+                      </Select.Root>
+                    </div>
+                    <div class="text-xs text-muted-foreground max-w-[260px]">
+                      {glyphSetOptions.find((s) => s.id === glyphSetValue)?.description}
+                    </div>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      class="mt-2"
+                      onclick={() => {
+                        hardResetGlyphStorage();
+                        settingsChanged = true;
+                      }}
+                    >
+                      Reset glyph cache
+                    </Button>
+                  </div>
+                  <div class="w-full min-w-0 flex-1 mt-4 sm:mt-0">
+                    <GlyphManager embedded={true} />
                   </div>
                 </div>
               {:else if selectedSettingsSection === 'manual'}
@@ -1256,7 +1680,7 @@
               {#snippet children()}
                 <div class="space-y-1 text-sm max-h-full overflow-y-auto pr-1">
                   <!-- Obecné -->
-                  <button
+                  <Button
                     type="button"
                     class={`w-full text-left px-2 py-1.5 text-sm rounded-md transition-colors ${
                       selectedTransitsSection === 'obecne'
@@ -1266,10 +1690,10 @@
                     onclick={() => selectedTransitsSection = 'obecne'}
                   >
                     Obecné
-                  </button>
+                  </Button>
                   
                   <!-- Tranzitující tělesa -->
-                  <button
+                  <Button
                     type="button"
                     class={`w-full text-left px-2 py-1.5 text-sm rounded-md transition-colors ${
                       selectedTransitsSection === 'transiting'
@@ -1279,10 +1703,10 @@
                     onclick={() => selectedTransitsSection = 'transiting'}
                   >
                     Tranzitující tělesa
-                  </button>
+                  </Button>
                   
                   <!-- Tranzitovaná tělesa -->
-                  <button
+                  <Button
                     type="button"
                     class={`w-full text-left px-2 py-1.5 text-sm rounded-md transition-colors ${
                       selectedTransitsSection === 'transited'
@@ -1292,10 +1716,10 @@
                     onclick={() => selectedTransitsSection = 'transited'}
                   >
                     Tranzitovaná tělesa
-                  </button>
+                  </Button>
                   
                   <!-- Použité aspekty -->
-                  <button
+                  <Button
                     type="button"
                     class={`w-full text-left px-2 py-1.5 text-sm rounded-md transition-colors ${
                       selectedTransitsSection === 'aspects'
@@ -1305,7 +1729,7 @@
                     onclick={() => selectedTransitsSection = 'aspects'}
                   >
                     Použité aspekty
-                  </button>
+                  </Button>
                 </div>
               {/snippet}
             </ExpandablePanel>
@@ -1316,137 +1740,74 @@
         <div class="h-full min-w-0 flex flex-col gap-2 min-h-0">
           <!-- Panel 1: title is current context name -->
           <div class="min-h-0" class:flex-1={leftTopExpanded}>
-            <ExpandablePanel title={layout.selectedContext} bind:expanded={leftTopExpanded}>
+            <ExpandablePanel 
+              title={selectedChart?.name || t('no_chart_selected', {}, 'No chart selected')} 
+              bind:expanded={leftTopExpanded}
+              editable={true}
+              onEdit={() => {
+                if (!selectedChart) {
+                  return;
+                }
+                editingChartId = selectedChart.id;
+                populateFormFromChart(selectedChart);
+                setMode('new_radix');
+              }}
+            >
               {#snippet children()}
-                <div class="space-y-2.5 text-sm">
-                  <!-- Chart Type -->
-                  <div class="flex items-start justify-between gap-3 py-1 border-b border-border/40">
-                    <div class="text-xs font-medium opacity-75 flex-shrink-0">
-                      {t('new_type', {}, 'Type')}
+                <!-- Complete compact: name, type+date+time+place, zodiac+house+engine+tz, tags -->
+                <div class="space-y-1.5 text-xs">
+                  <!-- Row 0: Chart name (when different from header or for completeness) -->
+                  {#if selectedChart?.name}
+                    <div class="font-medium opacity-95 truncate" title={selectedChart.name}>
+                      {selectedChart.name}
                     </div>
-                    <div class="opacity-85 text-right text-xs">
+                  {/if}
+                  <!-- Row 1: Type · Date · Time · Place (always show all) -->
+                  <div class="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 opacity-90">
+                    <span class="font-semibold">
                       {chartDetails.chartType === 'NATAL' ? t('new_type_radix', {}, 'Radix')
                         : chartDetails.chartType === 'EVENT' ? t('new_type_event', {}, 'Event')
                         : chartDetails.chartType === 'HORARY' ? t('new_type_horary', {}, 'Horary')
                         : t('new_type_composite', {}, 'Composite')}
-                    </div>
+                    </span>
+                    <span class="opacity-60">·</span>
+                    <span class="font-mono">{chartDetails.date || '—'}</span>
+                    <span class="opacity-60">·</span>
+                    <span class="font-mono">{chartDetails.time || '—'}</span>
+                    <span class="opacity-60">·</span>
+                    <span class="truncate min-w-0" title={chartDetails.location || ''}>
+                      {chartDetails.location || (chartDetails.latitude && chartDetails.longitude ? `(${chartDetails.latitude}, ${chartDetails.longitude})` : '—')}
+                    </span>
                   </div>
-                  
-                  <!-- Date -->
-                  <div class="flex items-start justify-between gap-3 py-1 border-b border-border/40">
-                    <div class="text-xs font-medium opacity-75 flex-shrink-0">
-                      {t('new_date', {}, 'Date')}
-                    </div>
-                    <div class="opacity-85 font-mono text-xs text-right">
-                      {chartDetails.date || '—'}
-                    </div>
+                  <!-- Row 2: Zodiac · House · Engine · Timezone -->
+                  <div class="flex flex-wrap items-baseline gap-x-2 opacity-75">
+                    <span>{chartDetails.zodiacType || '—'}</span>
+                    <span class="opacity-60">·</span>
+                    <span>{chartDetails.houseSystem || '—'}</span>
+                    {#if chartDetails.engine && chartDetails.engine !== '—'}
+                      <span class="opacity-60">·</span>
+                      <span>{chartDetails.engine}</span>
+                    {/if}
+                    {#if chartDetails.timezone}
+                      <span class="opacity-60">·</span>
+                      <span>{chartDetails.timezone}</span>
+                    {/if}
                   </div>
-                  
-                  <!-- Time -->
-                  <div class="flex items-start justify-between gap-3 py-1 border-b border-border/40">
-                    <div class="text-xs font-medium opacity-75 flex-shrink-0">
-                      {t('new_time', {}, 'Time')}
-                    </div>
-                    <div class="opacity-85 font-mono text-xs text-right">
-                      {chartDetails.time || '—'}
-                    </div>
-                  </div>
-                  
-                  <!-- Location -->
-                  <div class="flex items-start justify-between gap-3 py-1 border-b border-border/40">
-                    <div class="text-xs font-medium opacity-75 flex-shrink-0">
-                      {t('new_location', {}, 'Location')}
-                    </div>
-                    <div class="opacity-85 text-xs text-right space-y-0.5 min-w-0 flex-1">
-                      {#if chartDetails.location}
-                        <div class="break-words">{chartDetails.location}</div>
-                      {/if}
-                      {#if chartDetails.latitude && chartDetails.longitude}
-                        <div class="font-mono opacity-75 text-[10px]">
-                          {chartDetails.latitude}, {chartDetails.longitude}
-                        </div>
-                      {/if}
-                      {#if !chartDetails.location && !chartDetails.latitude}
-                        <div class="opacity-60">—</div>
+                  <!-- Row 3: Tags as small labels (always show row; pills or "—") -->
+                  {#if true}
+                    {@const tagList = (chartDetails.tags || '').split(',').map((t: string) => t.trim()).filter(Boolean)}
+                    <div class="flex flex-wrap gap-1 pt-0.5">
+                      {#if tagList.length > 0}
+                        {#each tagList as tag}
+                          <span class="inline-flex items-center px-1.5 py-0.5 rounded bg-muted/70 text-[10px] opacity-85">
+                            {tag}
+                          </span>
+                        {/each}
+                      {:else}
+                        <span class="text-[10px] opacity-50">—</span>
                       {/if}
                     </div>
-                  </div>
-                  
-                  <!-- House System -->
-                  <div class="flex items-start justify-between gap-3 py-1 border-b border-border/40">
-                    <div class="text-xs font-medium opacity-75 flex-shrink-0">
-                      {t('house_system', {}, 'House System')}
-                    </div>
-                    <div class="opacity-85 text-xs text-right">
-                      {chartDetails.houseSystem}
-                    </div>
-                  </div>
-                  
-                  <!-- Zodiac Type -->
-                  <div class="flex items-start justify-between gap-3 py-1 border-b border-border/40">
-                    <div class="text-xs font-medium opacity-75 flex-shrink-0">
-                      {t('zodiac_type', {}, 'Zodiac Type')}
-                    </div>
-                    <div class="opacity-85 text-xs text-right">
-                      {chartDetails.zodiacType}
-                    </div>
-                  </div>
-                  
-                  <!-- Engine -->
-                  <div class="flex items-start justify-between gap-3 py-1 border-b border-border/40">
-                    <div class="text-xs font-medium opacity-75 flex-shrink-0">
-                      {t('engine', {}, 'Engine')}
-                    </div>
-                    <div class="opacity-85 text-xs text-right">
-                      {chartDetails.engine}
-                    </div>
-                  </div>
-                  
-                  <!-- Model -->
-                  {#if chartDetails.model && chartDetails.model !== '—'}
-                    <div class="flex items-start justify-between gap-3 py-1 border-b border-border/40">
-                      <div class="text-xs font-medium opacity-75 flex-shrink-0">
-                        {t('model', {}, 'Model')}
-                      </div>
-                      <div class="opacity-85 text-xs text-right">
-                        {chartDetails.model}
-                      </div>
-                    </div>
                   {/if}
-                  
-                  <!-- Override Ephemeris -->
-                  {#if chartDetails.overrideEphemeris && chartDetails.overrideEphemeris !== '—'}
-                    <div class="flex items-start justify-between gap-3 py-1 border-b border-border/40">
-                      <div class="text-xs font-medium opacity-75 flex-shrink-0">
-                        {t('override_ephemeris', {}, 'Override Ephemeris')}
-                      </div>
-                      <div class="opacity-85 text-xs text-right break-words min-w-0 flex-1">
-                        {chartDetails.overrideEphemeris}
-                      </div>
-                    </div>
-                  {/if}
-                  
-                  <!-- Timezone -->
-                  {#if chartDetails.timezone}
-                    <div class="flex items-start justify-between gap-3 py-1 border-b border-border/40">
-                      <div class="text-xs font-medium opacity-75 flex-shrink-0">
-                        {t('timezone', {}, 'Timezone')}
-                      </div>
-                      <div class="opacity-85 text-xs text-right">
-                        {chartDetails.timezone}
-                      </div>
-                    </div>
-                  {/if}
-                  
-                  <!-- Tags -->
-                  <div class="flex items-start justify-between gap-3 py-1">
-                    <div class="text-xs font-medium opacity-75 flex-shrink-0">
-                      {t('new_tags', {}, 'Tags')}
-                    </div>
-                    <div class="opacity-85 text-xs text-right break-words min-w-0 flex-1">
-                      {chartDetails.tags || '—'}
-                    </div>
-                  </div>
                 </div>
               {/snippet}
             </ExpandablePanel>
@@ -1471,21 +1832,73 @@
               <div class="space-y-4 max-w-md">
                 <div class="space-y-2">
                   <div class="text-sm font-medium">Z graf</div>
-                  <select class="w-full h-9 px-3 rounded-md bg-background text-foreground border">
-                    <option>Vyberte graf...</option>
-                  </select>
+                  <Select.Root type="single" bind:value={transitSourceChartId}>
+                    <Select.Trigger class="w-full h-9 px-3">
+                      {layout.contexts.find((chart) => chart.id === transitSourceChartId)?.name ?? 'Vyberte graf...'}
+                    </Select.Trigger>
+                    <Select.Content>
+                      <Select.Group>
+                        {#if layout.contexts.length === 0}
+                          <Select.Item value="" label="Vyberte graf...">Vyberte graf...</Select.Item>
+                        {:else}
+                          {#each layout.contexts as chart}
+                            <Select.Item value={chart.id} label={chart.name}>{chart.name}</Select.Item>
+                          {/each}
+                        {/if}
+                      </Select.Group>
+                    </Select.Content>
+                  </Select.Root>
                 </div>
                 <div class="space-y-2">
                   <div class="text-sm font-medium">Do grafu</div>
-                  <select class="w-full h-9 px-3 rounded-md bg-background text-foreground border">
-                    <option>Vyberte graf...</option>
-                  </select>
+                  <Select.Root type="single" bind:value={transitSourceChartId}>
+                    <Select.Trigger class="w-full h-9 px-3">
+                      {layout.contexts.find((chart) => chart.id === transitSourceChartId)?.name ?? 'Vyberte graf...'}
+                    </Select.Trigger>
+                    <Select.Content>
+                      <Select.Group>
+                        {#if layout.contexts.length === 0}
+                          <Select.Item value="" label="Vyberte graf...">Vyberte graf...</Select.Item>
+                        {:else}
+                          {#each layout.contexts as chart}
+                            <Select.Item value={chart.id} label={chart.name}>{chart.name}</Select.Item>
+                          {/each}
+                        {/if}
+                      </Select.Group>
+                    </Select.Content>
+                  </Select.Root>
                 </div>
                 <div class="space-y-2">
                   <div class="text-sm font-medium">Časové rozmezí</div>
                   <div class="grid grid-cols-2 gap-2">
-                    <input type="date" class="h-9 px-3 rounded-md bg-background text-foreground border" />
-                    <input type="date" class="h-9 px-3 rounded-md bg-background text-foreground border" />
+                    <Input
+                      type="date"
+                      class="h-9 px-3 rounded-md bg-background text-foreground border"
+                      value={timeNavigation.startTime.toISOString().slice(0, 10)}
+                      onchange={(event) => {
+                        const value = (event.currentTarget as HTMLInputElement).value;
+                        if (value) {
+                          timeNavigation.startTime = new Date(`${value}T00:00:00`);
+                          if (timeNavigation.currentTime < timeNavigation.startTime) {
+                            timeNavigation.currentTime = new Date(timeNavigation.startTime);
+                          }
+                        }
+                      }}
+                    />
+                    <Input
+                      type="date"
+                      class="h-9 px-3 rounded-md bg-background text-foreground border"
+                      value={timeNavigation.endTime.toISOString().slice(0, 10)}
+                      onchange={(event) => {
+                        const value = (event.currentTarget as HTMLInputElement).value;
+                        if (value) {
+                          timeNavigation.endTime = new Date(`${value}T23:59:59`);
+                          if (timeNavigation.currentTime > timeNavigation.endTime) {
+                            timeNavigation.currentTime = new Date(timeNavigation.endTime);
+                          }
+                        }
+                      }}
+                    />
                   </div>
                 </div>
               </div>
@@ -1525,17 +1938,81 @@
               </div>
             {/if}
           </div>
+          {#if transitLoading}
+            <div class="mt-4 text-xs opacity-80">Počítám tranzity...</div>
+          {/if}
+          {#if transitError}
+            <div class="mt-4 text-xs text-destructive">{transitError}</div>
+          {/if}
+          {#if transitSeries.length > 0}
+            <div class="mt-4 border-t border-border/60 pt-4">
+              <div class="text-xs font-medium opacity-80 mb-2">
+                Výsledky: {transitSeries.length} záznamů
+              </div>
+              <div class="overflow-auto max-h-64 border rounded-md">
+                <table class="w-full text-xs border-collapse">
+                  <thead class="sticky top-0 bg-background border-b">
+                    <tr>
+                      <th class="text-left p-2 font-semibold opacity-85">Čas</th>
+                      <th class="text-left p-2 font-semibold opacity-85">Tělesa</th>
+                      <th class="text-left p-2 font-semibold opacity-85">Aspekty</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {#each transitSeries.slice(0, 50) as entry}
+                      <tr class="border-b hover:bg-accent/50 transition-colors">
+                        <td class="p-2">{entry.datetime}</td>
+                        <td class="p-2">{Object.keys(entry.transit_positions ?? {}).length}</td>
+                        <td class="p-2">{(entry.aspects ?? []).length}</td>
+                      </tr>
+                    {/each}
+                  </tbody>
+                </table>
+              </div>
+              {#if transitSeries.length > 50}
+                <div class="text-xs opacity-70 mt-2">Zobrazeno prvních 50 záznamů.</div>
+              {/if}
+            </div>
+          {/if}
           <!-- Calculate button at bottom -->
           <div class="pt-4 mt-4 border-t border-border/60 flex-shrink-0">
             <Button 
               class="w-full"
-              onclick={() => {
-                // TODO: Implement transit calculation
-                console.log('Calculate transits', {
-                  transitingBodies,
-                  transitedBodies,
-                  selectedAspects
-                });
+              onclick={async () => {
+                if (!layout.workspacePath) {
+                  transitError = 'Open a workspace to compute transits, or save your charts to a folder first.';
+                  return;
+                }
+                const chartId = transitSourceChartId || getSelectedChart()?.id;
+                if (!chartId) {
+                  transitError = 'No chart selected for transit computation.';
+                  return;
+                }
+                transitLoading = true;
+                transitError = null;
+                transitSeries = [];
+                transitMeta = null;
+
+                try {
+                  const result = await invoke<TransitSeriesResult>('compute_transit_series', {
+                    workspacePath: layout.workspacePath,
+                    chartId: chartId,
+                    startDatetime: timeNavigation.startTime.toISOString(),
+                    endDatetime: timeNavigation.endTime.toISOString(),
+                    timeStepSeconds: stepToSeconds(),
+                    transitingObjects: transitingBodies,
+                    transitedObjects: transitedBodies,
+                    aspectTypes: selectedAspects,
+                  });
+
+                  transitMeta = result;
+                  transitSeries = result.results ?? [];
+                } catch (err) {
+                  console.error('Failed to compute transits:', err);
+                  transitError = err instanceof Error ? err.message : 'Transit computation failed.';
+                } finally {
+                  transitLoading = false;
+                }
               }}
             >
               {t('calculate', {}, 'Calculate')}
@@ -1543,72 +2020,87 @@
           </div>
         </div>
       {:else}
-        <div class="h-full min-w-0">
+        <div class="h-full min-h-0 min-w-0 overflow-hidden">
           <MiddleContent />
         </div>
       {/if}
 
       <!-- Right panel (hidden for Aspects view and Transits view) -->
       {#if !isAspectsView && !isTransitsView}
-        <div class="h-full min-w-0">
-          <ExpandablePanel title={t('right_panel', {}, 'Location')} bind:expanded={rightExpanded}>
-            {#snippet children()}
-              {#if mode === 'radix_view'}
-                <!-- Location table: object glyph / location (degrees glyph minutes) -->
-                <div class="overflow-auto">
-                  <table class="w-full text-sm border-collapse">
-                    <thead class="sticky top-0 bg-background border-b">
-                      <tr>
-                        <th class="text-left p-2 font-semibold opacity-85">{t('table_object', {}, 'Object')}</th>
-                        <th class="text-left p-2 font-semibold opacity-85">{t('table_location', {}, 'Location')}</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {#each Object.entries(planets) as [planetName, planetData]}
-                        {@const planetGlyph = getGlyphContent(planetName)}
-                        {@const signSymbolMap: Record<string, string> = {
-                          '♈': 'aries', '♉': 'taurus', '♊': 'gemini', '♋': 'cancer',
-                          '♌': 'leo', '♍': 'virgo', '♎': 'libra', '♏': 'scorpio',
-                          '♐': 'sagittarius', '♑': 'capricorn', '♒': 'aquarius', '♓': 'pisces'
-                        }}
-                        {@const signName = signSymbolMap[planetData.sign] || planetData.sign.toLowerCase()}
-                        {@const signGlyph = getGlyphContent(signName)}
-                        {@const signDeg = planetData.degrees % 30}
-                        {@const minutes = Math.floor((signDeg % 1) * 60)}
-                        <tr class="border-b hover:bg-accent/50 transition-colors">
-                          <td class="p-2">
-                            {#if planetGlyph.type === 'svg'}
-                              <span class="inline-block" style="width: 1.2em; height: 1.2em; vertical-align: middle;">
-                                {@html planetGlyph.content}
-                              </span>
-                            {:else}
-                              <span class="text-lg">{planetGlyph.content || planetName.charAt(0).toUpperCase()}</span>
-                            {/if}
-                          </td>
-                          <td class="p-2 opacity-75 font-mono text-xs">
-                            {Math.floor(signDeg)}° 
-                            {#if signGlyph.type === 'svg'}
-                              <span class="inline-block" style="width: 1em; height: 1em; vertical-align: middle;">
-                                {@html signGlyph.content}
-                              </span>
-                            {:else}
-                              {signGlyph.content || planetData.sign}
-                            {/if}
-                            {' '}{minutes}'
-                          </td>
-                        </tr>
-                      {/each}
-                    </tbody>
-                  </table>
-                </div>
-              {:else}
-                <div class="space-y-2 text-sm">
-                  <p>{t('right_panel_description', {}, 'Expandable content (right). Put properties, logs, etc.')}</p>
-                  <div class="h-40 rounded border border-dashed bg-muted/40"></div>
-                </div>
-              {/if}
-            {/snippet}
-          </ExpandablePanel>
+        <div class="h-full min-w-0 flex flex-col gap-2 min-h-0">
+          <!-- Poloha: radix view = single column list; other = placeholder -->
+          <div class="min-h-0 flex-1 min-w-0">
+            <ExpandablePanel title={t('right_panel', {}, 'Poloha')} bind:expanded={rightExpanded}>
+              {#snippet children()}
+                {#if isRadixLikeMode}
+                  <!-- Radix: one column = object + position (e.g. "Sun 28°15'") -->
+                  <ul class="space-y-0.5 text-[11px] max-h-full overflow-auto pr-1">
+                    {#each planetRows as [planetName, planetData]}
+                      {@const planetGlyph = getGlyphContent(planetName)}
+                      {@const signDeg = planetData.positionInHouse}
+                      {@const minutes = Math.floor((signDeg % 1) * 60)}
+                      <li class="flex items-center gap-1.5 py-0.5 border-b border-border/30 last:border-0">
+                        {#if planetGlyph.type === 'svg'}
+                          <span class="inline-block flex-shrink-0" style="width: 0.9em; height: 0.9em; vertical-align: middle;">{@html planetGlyph.content}</span>
+                        {:else if planetGlyph.type === 'file'}
+                          {#if failedGlyphFiles[`p:${planetName}:${planetGlyph.content}`]}
+                            <span class="flex-shrink-0 w-[0.9em] text-center">{planetGlyph.fallback || planetName.charAt(0).toUpperCase()}</span>
+                          {:else}
+                            <img src={planetGlyph.content} alt={planetName} class="w-[0.9em] h-[0.9em] flex-shrink-0 object-contain" onerror={() => { failedGlyphFiles[`p:${planetName}:${planetGlyph.content}`] = true; failedGlyphFiles = { ...failedGlyphFiles }; }} />
+                          {/if}
+                        {:else}
+                          <span class="flex-shrink-0 w-[0.9em] text-center">{planetGlyph.content || planetName.charAt(0).toUpperCase()}</span>
+                        {/if}
+                        <span class="capitalize truncate min-w-0">{planetName.replaceAll('_', ' ')}</span>
+                        <span class="font-mono opacity-80 flex-shrink-0">{Math.floor(signDeg)}° {minutes}'</span>
+                      </li>
+                    {/each}
+                    {#if planetRows.length === 0}
+                      <li class="py-1.5 opacity-60 text-[10px]">No computed positions yet.</li>
+                    {/if}
+                  </ul>
+                {:else}
+                  <div class="space-y-2 text-sm">
+                    <p class="text-xs">{t('right_panel_description', {}, 'Expandable content (right).')}</p>
+                    <div class="h-24 rounded border border-dashed bg-muted/40"></div>
+                  </div>
+                {/if}
+              {/snippet}
+            </ExpandablePanel>
+          </div>
+          <!-- Right bottom: expandable tiny positions summary (like table view, compact) -->
+          {#if isRadixLikeMode}
+            <div class="flex-shrink-0 min-h-0 min-w-0">
+              <ExpandablePanel title={t('positions_summary', {}, 'Positions summary')} bind:expanded={rightBottomExpanded} editable={false}>
+                {#snippet children()}
+                  {#if planetRows.length > 0}
+                    <div class="p-1 overflow-x-auto">
+                      <table class="w-full text-[10px] border-collapse min-w-max">
+                        <thead>
+                          <tr class="border-b border-border/30">
+                            {#each planetRows.slice(0, 10) as [planetName]}
+                              <th class="px-1 py-0.5 text-left font-normal opacity-85 capitalize truncate max-w-[3rem]">{planetName.replaceAll('_', ' ')}</th>
+                            {/each}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          <tr>
+                            {#each planetRows.slice(0, 10) as [planetName, planetData]}
+                              {@const deg = Math.floor(planetData.positionInHouse)}
+                              {@const min = Math.floor((planetData.positionInHouse % 1) * 60)}
+                              <td class="px-1 py-0.5 font-mono opacity-90">{deg}°{min}'</td>
+                            {/each}
+                          </tr>
+                        </tbody>
+                      </table>
+                    </div>
+                  {:else}
+                    <p class="text-[10px] opacity-60 px-1 py-1.5">No computed positions yet.</p>
+                  {/if}
+                {/snippet}
+              </ExpandablePanel>
+            </div>
+          {/if}
         </div>
       {/if}
     </section>

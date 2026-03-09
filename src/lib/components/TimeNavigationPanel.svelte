@@ -5,15 +5,17 @@
     effectiveTime,
     stepForward, 
     stepBackward,
+    applyShift,
+    resetShift,
     type TimeStep
   } from '$lib/stores/timeNavigation.svelte';
   import { t } from '$lib/i18n/index.svelte';
   import * as Select from '$lib/components/ui/select/index.js';
   import * as Popover from '$lib/components/ui/popover/index.js';
-  import * as Calendar from '$lib/components/ui/calendar/index.js';
+  import { Calendar } from '$lib/components/ui/calendar/index.js';
   import { Button } from '$lib/components/ui/button/index.js';
   import { Input } from '$lib/components/ui/input/index.js';
-  import { CalendarDate, getLocalTimeZone, parseDate, today } from '@internationalized/date';
+  import { CalendarDate, getLocalTimeZone, type DateValue } from '@internationalized/date';
   import { formatTime } from '$lib/stores/timeNavigation.svelte';
 
   // Step amount options (1-30)
@@ -48,13 +50,14 @@
   const effective = $derived(effectiveTime());
   const currentDate = $derived(() => {
     const d = effectiveTime();
-    return new CalendarDate(d.getFullYear(), d.getMonth() + 1, d.getDate());
+    return new CalendarDate(d.getFullYear(), d.getMonth() + 1, d.getDate()) as DateValue;
   });
 
-  let selectedDate = $state<CalendarDate | undefined>(undefined);
+  let selectedDate = $state<DateValue | undefined>(undefined);
   let datePopoverOpen = $state(false);
   const effectiveTimeValue = $derived(effectiveTime().getTime());
   let lastEffectiveTime = $state(0);
+  let lastAppliedSelectedDate = $state('');
   
   // Initialize selectedDate and lastEffectiveTime
   $effect(() => {
@@ -78,7 +81,7 @@
   });
 
   // Update date when selected and popover closes
-  function handleDateChange(newDate: CalendarDate | undefined) {
+  function handleDateChange(newDate: DateValue | undefined) {
     if (newDate) {
       const d = effective;
       const updatedDate = new Date(
@@ -93,6 +96,16 @@
       timeNavigation.currentTime = updatedDate;
     }
   }
+
+  // Apply date selection only after user picks in open popover.
+  $effect(() => {
+    if (!datePopoverOpen || !selectedDate) return;
+    const marker = String(selectedDate);
+    if (marker === lastAppliedSelectedDate) return;
+    lastAppliedSelectedDate = marker;
+    handleDateChange(selectedDate);
+    datePopoverOpen = false;
+  });
 
   // Time input state
   let timeValue = $state('');
@@ -136,6 +149,17 @@
   // Location state
   let locationValue = $state('');
 
+  // Sync shift values with timeNavigation
+  $effect(() => {
+    // Ensure shift values are numbers
+    if (typeof timeNavigation.shift.years !== 'number') timeNavigation.shift.years = 0;
+    if (typeof timeNavigation.shift.months !== 'number') timeNavigation.shift.months = 0;
+    if (typeof timeNavigation.shift.days !== 'number') timeNavigation.shift.days = 0;
+    if (typeof timeNavigation.shift.hours !== 'number') timeNavigation.shift.hours = 0;
+    if (typeof timeNavigation.shift.minutes !== 'number') timeNavigation.shift.minutes = 0;
+    if (typeof timeNavigation.shift.seconds !== 'number') timeNavigation.shift.seconds = 0;
+  });
+
   // Update button handler
   function handleUpdate() {
     // This will trigger any updates needed when the update button is clicked
@@ -144,7 +168,7 @@
   }
 
   // Format date for display
-  function formatDate(date: CalendarDate): string {
+  function formatDate(date: DateValue): string {
     const d = date.toDate(getLocalTimeZone());
     return d.toLocaleDateString('cs-CZ', { 
       day: '2-digit', 
@@ -155,160 +179,78 @@
   }
 </script>
 
-<div class="space-y-3 text-sm">
-  <!-- Row 1: Left/right buttons, amount selector, granularity selector -->
-  <div class="flex items-center gap-2">
-    <button 
-      type="button"
-      class="px-2 py-1.5 text-xs border rounded hover:bg-muted/50 transition-colors flex-shrink-0"
-      onclick={stepBackward}
-      title={t('time_nav_previous', {}, 'Previous')}
-    >
-      ⏪
-    </button>
-    
+<div class="space-y-2 text-xs">
+  <!-- Row 1: Step controls (arrows + amount + unit) -->
+  <div class="flex items-center gap-1.5">
+    <Button type="button" variant="outline" size="sm" class="h-7 w-7 p-0 flex-shrink-0" onclick={stepBackward} title={t('time_nav_previous', {}, 'Previous')}>⏪</Button>
     <Select.Root type="single" bind:value={stepAmount}>
-      <Select.Trigger class="h-8 px-3 text-sm font-medium flex-1 min-w-[60px]">
-        {#snippet children()}
-          {stepAmount || '1'}
-        {/snippet}
-      </Select.Trigger>
+      <Select.Trigger class="h-7 px-2 min-w-[2rem] text-xs">{#snippet children()}{stepAmount || '1'}{/snippet}</Select.Trigger>
       <Select.Content>
         <Select.Group>
           {#each stepAmountOptions as amount}
-            <Select.Item value={String(amount)} label={String(amount)}>
-              {amount}
-            </Select.Item>
+            <Select.Item value={String(amount)} label={String(amount)}>{amount}</Select.Item>
           {/each}
         </Select.Group>
       </Select.Content>
     </Select.Root>
-
     <Select.Root type="single" bind:value={stepUnit}>
-      <Select.Trigger class="h-8 px-3 text-sm font-medium flex-1 min-w-[80px]">
-        {#snippet children()}
-          {stepUnitOptions.find(u => u.value === stepUnit)?.label || t('time_nav_hours', {}, 'Hours')}
-        {/snippet}
+      <Select.Trigger class="h-7 px-2 min-w-[4rem] text-xs">
+        {#snippet children()}{stepUnitOptions.find(u => u.value === stepUnit)?.label || t('time_nav_hours', {}, 'Hours')}{/snippet}
       </Select.Trigger>
       <Select.Content>
         <Select.Group>
           {#each stepUnitOptions as unit}
-            <Select.Item value={unit.value} label={unit.label}>
-              {unit.label}
-            </Select.Item>
+            <Select.Item value={unit.value} label={unit.label}>{unit.label}</Select.Item>
           {/each}
         </Select.Group>
       </Select.Content>
     </Select.Root>
-
-    <button 
-      type="button"
-      class="px-2 py-1.5 text-xs border rounded hover:bg-muted/50 transition-colors flex-shrink-0"
-      onclick={stepForward}
-      title={t('time_nav_next', {}, 'Next')}
-    >
-      ⏩
-    </button>
+    <Button type="button" variant="outline" size="sm" class="h-7 w-7 p-0 flex-shrink-0" onclick={stepForward} title={t('time_nav_next', {}, 'Next')}>⏩</Button>
   </div>
 
-  <!-- Row 2: Date icon + date selector -->
-  <div class="flex items-center gap-2">
-    <div class="flex-shrink-0 w-5 h-5 flex items-center justify-center opacity-75">
-      📅
-    </div>
+  <!-- Row 2: Date + Time on one row -->
+  <div class="flex items-center gap-1.5">
     <Popover.Root bind:open={datePopoverOpen}>
       <Popover.Trigger>
-        <Button
-          variant="outline"
-          class="flex-1 h-8 px-2 text-xs justify-start font-normal"
-        >
+        <Button variant="outline" class="h-7 flex-1 min-w-0 px-2 text-[11px] justify-start font-normal truncate">
           {selectedDate ? formatDate(selectedDate) : formatDate(currentDate())}
         </Button>
       </Popover.Trigger>
       <Popover.Content class="w-auto p-0" align="start">
-        <Calendar
-          bind:value={selectedDate}
-          locale="cs-CZ"
-          onchange={(value) => {
-            if (value) {
-              handleDateChange(value);
-            }
-            datePopoverOpen = false;
-          }}
-        >
-          {#snippet children({ months, weekdays })}
-            <Calendar.Months>
-              {#each months as month, monthIndex (month)}
-                <Calendar.Month>
-                  <Calendar.Header>
-                    <Calendar.PrevButton />
-                    <Calendar.Caption />
-                    <Calendar.NextButton />
-                  </Calendar.Header>
-                  <Calendar.Grid>
-                    <Calendar.GridHead>
-                      <Calendar.GridRow>
-                        {#each weekdays as weekday}
-                          <Calendar.HeadCell>{weekday}</Calendar.HeadCell>
-                        {/each}
-                      </Calendar.GridRow>
-                    </Calendar.GridHead>
-                    <Calendar.GridBody>
-                      <Calendar.GridRow let:week>
-                        {#each week as date}
-                          <Calendar.Cell>
-                            <Calendar.Day {date} />
-                          </Calendar.Cell>
-                        {/each}
-                      </Calendar.GridRow>
-                    </Calendar.GridBody>
-                  </Calendar.Grid>
-                </Calendar.Month>
-              {/each}
-            </Calendar.Months>
-          {/snippet}
-        </Calendar>
+        <Calendar type="single" bind:value={selectedDate} locale="cs-CZ" />
       </Popover.Content>
     </Popover.Root>
-  </div>
-
-  <!-- Row 3: Time icon + time selector -->
-  <div class="flex items-center gap-2">
-    <div class="flex-shrink-0 w-5 h-5 flex items-center justify-center opacity-75">
-      🕐
-    </div>
     <Input
       type="text"
-      class="flex-1 h-8 px-2 text-xs font-mono"
+      class="h-7 w-20 px-1.5 text-[11px] font-mono flex-shrink-0"
       bind:value={timeValue}
       onfocus={() => isTimeInputFocused = true}
-      onblur={() => {
-        isTimeInputFocused = false;
-        updateTime(new Event('change'));
-      }}
+      onblur={() => { isTimeInputFocused = false; updateTime(new Event('change')); }}
       onchange={updateTime}
       placeholder="HH:MM:SS"
-      pattern="[0-9]{2}:[0-9]{2}:[0-9]{2}"
     />
   </div>
 
-  <!-- Row 4: Location pin + location selector + update button -->
-  <div class="flex items-center gap-2">
-    <div class="flex-shrink-0 w-5 h-5 flex items-center justify-center opacity-75">
-      📍
+  <!-- Row 3: Location + Update -->
+  <div class="flex items-center gap-1.5">
+    <Input type="text" class="h-7 flex-1 min-w-0 px-2 text-[11px]" bind:value={locationValue} placeholder={t('new_location', {}, 'Location')} />
+    <Button type="button" class="h-7 px-2 text-[11px] flex-shrink-0" onclick={handleUpdate}>{t('time_nav_update', {}, 'Update')}</Button>
+  </div>
+
+  <!-- Time Shift: one row Y M D h m s + buttons -->
+  <div class="pt-1.5 border-t border-border/40 space-y-1.5">
+    <div class="text-[10px] font-medium opacity-75">{t('time_nav_shift', {}, 'Time Shift')}</div>
+    <div class="grid grid-cols-6 gap-1">
+      <Input id="shift-years" type="number" class="h-6 px-1 text-[10px]" value={String(timeNavigation.shift.years || 0)} onchange={(e) => timeNavigation.shift.years = parseInt((e.target as HTMLInputElement).value) || 0} placeholder="Y" title="Years" />
+      <Input id="shift-months" type="number" class="h-6 px-1 text-[10px]" value={String(timeNavigation.shift.months || 0)} onchange={(e) => timeNavigation.shift.months = parseInt((e.target as HTMLInputElement).value) || 0} placeholder="M" title="Months" />
+      <Input id="shift-days" type="number" class="h-6 px-1 text-[10px]" value={String(timeNavigation.shift.days || 0)} onchange={(e) => timeNavigation.shift.days = parseInt((e.target as HTMLInputElement).value) || 0} placeholder="D" title="Days" />
+      <Input id="shift-hours" type="number" class="h-6 px-1 text-[10px]" value={String(timeNavigation.shift.hours || 0)} onchange={(e) => timeNavigation.shift.hours = parseInt((e.target as HTMLInputElement).value) || 0} placeholder="h" title="Hours" />
+      <Input id="shift-minutes" type="number" class="h-6 px-1 text-[10px]" value={String(timeNavigation.shift.minutes || 0)} onchange={(e) => timeNavigation.shift.minutes = parseInt((e.target as HTMLInputElement).value) || 0} placeholder="m" title="Minutes" />
+      <Input id="shift-seconds" type="number" class="h-6 px-1 text-[10px]" value={String(timeNavigation.shift.seconds || 0)} onchange={(e) => timeNavigation.shift.seconds = parseInt((e.target as HTMLInputElement).value) || 0} placeholder="s" title="Seconds" />
     </div>
-    <Input
-      type="text"
-      class="flex-1 h-8 px-2 text-xs"
-      bind:value={locationValue}
-      placeholder={t('new_location', {}, 'Location')}
-    />
-    <Button
-      type="button"
-      class="h-8 px-3 text-xs flex-shrink-0"
-      onclick={handleUpdate}
-    >
-      {t('time_nav_update', {}, 'Update')}
-    </Button>
+    <div class="flex gap-1.5">
+      <Button type="button" variant={timeNavigation.shiftActive ? "default" : "outline"} class="h-6 flex-1 px-2 text-[10px]" onclick={applyShift}>{t('time_nav_apply_shift', {}, 'Apply')}</Button>
+      <Button type="button" variant="outline" class="h-6 px-2 text-[10px] flex-shrink-0" onclick={resetShift} disabled={!timeNavigation.shiftActive}>{t('time_nav_reset', {}, 'Reset')}</Button>
+    </div>
   </div>
 </div>
