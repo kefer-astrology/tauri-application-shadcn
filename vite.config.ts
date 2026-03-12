@@ -6,6 +6,8 @@ import { defineConfig } from 'vite';
 const host = process.env.TAURI_DEV_HOST;
 
 export default defineConfig({
+	// Serve files from static/ at root so /glyphs/sets/... resolve for SVG assets
+	publicDir: 'static',
 	plugins: [svelte({ compilerOptions: { runes: true } }), tailwindcss()],
 	resolve: {
 		alias: {
