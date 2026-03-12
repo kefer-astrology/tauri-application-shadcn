@@ -22,20 +22,20 @@
     aspects = []
   }: Props = $props();
   
-  // Default planet positions if not provided
+  // Default planet positions if not provided (sign = glyph id for settings-controlled display)
   const defaultPlanets = $derived({
-    sun: { degrees: 258, sign: '♐', house: 12 },
-    moon: { degrees: 253, sign: '♐', house: 12 },
-    mercury: { degrees: 265, sign: '♐', house: 12 },
-    venus: { degrees: 266, sign: '♐', house: 12 },
-    mars: { degrees: 153, sign: '♍', house: 5 },
-    jupiter: { degrees: 13, sign: '♈', house: 9 },
-    saturn: { degrees: 323, sign: '♒', house: 1 },
-    uranus: { degrees: 151, sign: '♍', house: 5 },
-    neptune: { degrees: 223, sign: '♏', house: 8 },
-    pluto: { degrees: 159, sign: '♍', house: 5 },
-    meanNode: { degrees: 112, sign: '♋', house: 4 },
-    chiron: { degrees: 344, sign: '♓', house: 2 }
+    sun: { degrees: 258, sign: 'sagittarius', house: 12 },
+    moon: { degrees: 253, sign: 'sagittarius', house: 12 },
+    mercury: { degrees: 265, sign: 'sagittarius', house: 12 },
+    venus: { degrees: 266, sign: 'sagittarius', house: 12 },
+    mars: { degrees: 153, sign: 'virgo', house: 5 },
+    jupiter: { degrees: 13, sign: 'aries', house: 9 },
+    saturn: { degrees: 323, sign: 'aquarius', house: 1 },
+    uranus: { degrees: 151, sign: 'virgo', house: 5 },
+    neptune: { degrees: 223, sign: 'scorpio', house: 8 },
+    pluto: { degrees: 159, sign: 'virgo', house: 5 },
+    meanNode: { degrees: 112, sign: 'cancer', house: 4 },
+    chiron: { degrees: 344, sign: 'pisces', house: 2 }
   });
   
   const planets = $derived<Record<string, { degrees: number; sign: string; house?: number }>>({

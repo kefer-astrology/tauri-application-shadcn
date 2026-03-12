@@ -227,7 +227,7 @@
       onfocus={() => isTimeInputFocused = true}
       onblur={() => { isTimeInputFocused = false; updateTime(new Event('change')); }}
       onchange={updateTime}
-      placeholder="HH:MM:SS"
+      placeholder={t('time_placeholder', {}, 'HH:MM:SS')}
     />
   </div>
 
@@ -241,12 +241,12 @@
   <div class="pt-1.5 border-t border-border/40 space-y-1.5">
     <div class="text-[10px] font-medium opacity-75">{t('time_nav_shift', {}, 'Time Shift')}</div>
     <div class="grid grid-cols-6 gap-1">
-      <Input id="shift-years" type="number" class="h-6 px-1 text-[10px]" value={String(timeNavigation.shift.years || 0)} onchange={(e) => timeNavigation.shift.years = parseInt((e.target as HTMLInputElement).value) || 0} placeholder="Y" title="Years" />
-      <Input id="shift-months" type="number" class="h-6 px-1 text-[10px]" value={String(timeNavigation.shift.months || 0)} onchange={(e) => timeNavigation.shift.months = parseInt((e.target as HTMLInputElement).value) || 0} placeholder="M" title="Months" />
-      <Input id="shift-days" type="number" class="h-6 px-1 text-[10px]" value={String(timeNavigation.shift.days || 0)} onchange={(e) => timeNavigation.shift.days = parseInt((e.target as HTMLInputElement).value) || 0} placeholder="D" title="Days" />
-      <Input id="shift-hours" type="number" class="h-6 px-1 text-[10px]" value={String(timeNavigation.shift.hours || 0)} onchange={(e) => timeNavigation.shift.hours = parseInt((e.target as HTMLInputElement).value) || 0} placeholder="h" title="Hours" />
-      <Input id="shift-minutes" type="number" class="h-6 px-1 text-[10px]" value={String(timeNavigation.shift.minutes || 0)} onchange={(e) => timeNavigation.shift.minutes = parseInt((e.target as HTMLInputElement).value) || 0} placeholder="m" title="Minutes" />
-      <Input id="shift-seconds" type="number" class="h-6 px-1 text-[10px]" value={String(timeNavigation.shift.seconds || 0)} onchange={(e) => timeNavigation.shift.seconds = parseInt((e.target as HTMLInputElement).value) || 0} placeholder="s" title="Seconds" />
+      <Input id="shift-years" type="number" class="h-6 px-1 text-[10px]" value={String(timeNavigation.shift.years || 0)} onchange={(e) => timeNavigation.shift.years = parseInt((e.target as HTMLInputElement).value) || 0} placeholder="Y" title={t('time_nav_years', {}, 'Years')} />
+      <Input id="shift-months" type="number" class="h-6 px-1 text-[10px]" value={String(timeNavigation.shift.months || 0)} onchange={(e) => timeNavigation.shift.months = parseInt((e.target as HTMLInputElement).value) || 0} placeholder="M" title={t('time_nav_months', {}, 'Months')} />
+      <Input id="shift-days" type="number" class="h-6 px-1 text-[10px]" value={String(timeNavigation.shift.days || 0)} onchange={(e) => timeNavigation.shift.days = parseInt((e.target as HTMLInputElement).value) || 0} placeholder="D" title={t('time_nav_days', {}, 'Days')} />
+      <Input id="shift-hours" type="number" class="h-6 px-1 text-[10px]" value={String(timeNavigation.shift.hours || 0)} onchange={(e) => timeNavigation.shift.hours = parseInt((e.target as HTMLInputElement).value) || 0} placeholder="h" title={t('time_nav_hours', {}, 'Hours')} />
+      <Input id="shift-minutes" type="number" class="h-6 px-1 text-[10px]" value={String(timeNavigation.shift.minutes || 0)} onchange={(e) => timeNavigation.shift.minutes = parseInt((e.target as HTMLInputElement).value) || 0} placeholder="m" title={t('time_nav_minutes', {}, 'Minutes')} />
+      <Input id="shift-seconds" type="number" class="h-6 px-1 text-[10px]" value={String(timeNavigation.shift.seconds || 0)} onchange={(e) => timeNavigation.shift.seconds = parseInt((e.target as HTMLInputElement).value) || 0} placeholder="s" title={t('time_nav_seconds', {}, 'Seconds')} />
     </div>
     <div class="flex gap-1.5">
       <Button type="button" variant={timeNavigation.shiftActive ? "default" : "outline"} class="h-6 flex-1 px-2 text-[10px]" onclick={applyShift}>{t('time_nav_apply_shift', {}, 'Apply')}</Button>

@@ -1,7 +1,7 @@
 <!-- Radix Chart Component - Interactive SVG polar chart -->
 <script lang="ts">
   import { effectiveTime } from '$lib/stores/timeNavigation.svelte';
-  import { glyphs } from '$lib/stores/glyphs.svelte';
+  import { glyphs, getGlyphContent } from '$lib/stores/glyphs.svelte';
   
   // Props
   interface Props {
@@ -19,6 +19,7 @@
     aspects = [],
     infoBlobs = []
   }: Props = $props();
+  let failedGlyphFiles = $state<Record<string, boolean>>({});
   
   // Default info blobs if not provided (3 blobs at 120-degree intervals)
   const defaultInfoBlobs = $derived(
@@ -34,72 +35,41 @@
   // Reactive to time changes
   const currentTime = $derived(effectiveTime());
   
-  // Chart dimensions - divided into 10 parts from outer to center
+  // Chart dimensions – percentage from outer to center: 9% houses, 3% second circle, 40% dark blue, rest inner
   const centerX = $derived(size / 2);
   const centerY = $derived(size / 2);
-  const maxRadius = $derived(size * 0.48); // Maximum chart radius
-  
-  // Divide radius into 10 parts
-  const partSize = $derived(maxRadius / 10);
-  
-  // Radii from outer to center:
-  const radius1 = $derived(maxRadius); // 1 - Outer border
-  const radius2 = $derived(maxRadius - partSize); // 2 - Zodiac strip (colored background + sign glyphs)
-  const radius3 = $derived(maxRadius - partSize * 2); // 3 - Planet glyph position
-  const radius4 = $derived(maxRadius - partSize * 3); // 4 - Precise angle text
-  const radius5 = $derived(maxRadius - partSize * 4); // 5 - Sign glyph position
-  const radius6 = $derived(maxRadius - partSize * 5); // 6 - Another degree text
-  const radius7 = $derived(maxRadius - partSize * 6); // 7 - House numbers strip
-  const radius8 = $derived(maxRadius - partSize * 7); // 8 - Dark center start
-  const radius9 = $derived(maxRadius - partSize * 8); // 9 - Dark center middle
-  const radius10 = $derived(maxRadius - partSize * 9); // 10 - Dark center inner (aspects)
-  
-  // Convenience radii
-  const outerBorderRadius = $derived(radius1);
-  const zodiacStripOuter = $derived(radius1);
-  const zodiacStripInner = $derived(radius2);
-  const planetGlyphRadius = $derived(radius3);
-  const angleTextRadius = $derived(radius4);
-  const signGlyphRadius = $derived(radius5);
-  const degreeTextRadius = $derived(radius6);
-  const houseStripOuter = $derived(radius6);
-  const houseStripInner = $derived(radius7);
-  const centerDarkOuter = $derived(radius7);
-  const centerDarkInner = $derived(radius10);
-  const aspectRadius = $derived(radius10 * 0.8); // Aspect lines inside dark center
-  
-  // Zodiac sign colors (alternating pattern)
-  const zodiacColors = [
-    '#2d5016', // dark green - Pisces
-    '#2d5016', // dark green - Aries
-    '#6b46c1', // purple - Taurus
-    '#3b82f6', // light blue - Gemini
-    '#3b82f6', // light blue - Cancer
-    '#6b46c1', // purple - Leo
-    '#2d5016', // dark green - Virgo
-    '#2d5016', // dark green - Libra
-    '#6b46c1', // purple - Scorpio
-    '#3b82f6', // light blue - Sagittarius
-    '#3b82f6', // light blue - Capricorn
-    '#2d5016'  // dark green - Aquarius
-  ];
-  
-  // Zodiac sign positions (middle of each 30-degree section)
-  const zodiacSigns = [
-    { name: 'pisces', degrees: 345 },
-    { name: 'aries', degrees: 15 },
-    { name: 'taurus', degrees: 45 },
-    { name: 'gemini', degrees: 75 },
-    { name: 'cancer', degrees: 105 },
-    { name: 'leo', degrees: 135 },
-    { name: 'virgo', degrees: 165 },
-    { name: 'libra', degrees: 195 },
-    { name: 'scorpio', degrees: 225 },
-    { name: 'sagittarius', degrees: 255 },
-    { name: 'capricorn', degrees: 285 },
-    { name: 'aquarius', degrees: 315 }
-  ];
-  
+  const maxRadius = $derived(size * 0.48);
+
+  // Radii as % of maxRadius: ~11% house ring, 4% second circle, dark blue, rest inner
+  const outerBorderRadius = $derived(maxRadius);
+  const housesOuter = $derived(maxRadius);
+  const housesInner = $derived(maxRadius * 0.89);   // 11% house ring (wider)
+  const zodiacStripOuter = $derived(maxRadius * 0.89);
+  const zodiacStripInner = $derived(maxRadius * 0.85);  // 4% strip: 89% → 85%
+  const darkBlueOuter = $derived(maxRadius * 0.85);
+  const darkBlueInner = $derived(maxRadius * 0.54);
+  const innerCircleRadius = $derived(maxRadius * 0.54);
+  const centerDarkOuter = $derived(maxRadius * 0.18);
+  const centerDarkInner = $derived(0);
+  const aspectRadius = $derived(maxRadius * 0.14);
+  const planetGlyphRadius = $derived(maxRadius * 0.76);
+  const angleTextRadius = $derived(maxRadius * 0.65);
+  const degreeTextRadius = $derived(maxRadius * 0.60); // kept for compatibility (single label uses angleTextRadius)
+  const partSize = $derived(maxRadius * 0.04);
+  // House sign glyphs: sized for readability, placed just inside dark blue (so they’re visible)
+  const zodiacStripGlyphSize = $derived(Math.max(14, partSize * 2));
+  const zodiacStripGlyphRadius = $derived(housesOuter - partSize * 1.15);
+
+  // Outer circle: 4 elements (fire, earth, air, water) – colors from CSS vars (Settings > Vzhled)
+  const ELEMENT_VARS = ['var(--element-fire)', 'var(--element-earth)', 'var(--element-air)', 'var(--element-water)'] as const;
+  const ringColorIndex = (segmentIndex: number) => segmentIndex % 4;
+  const zodiacColor = (signIndex: number) => ELEMENT_VARS[ringColorIndex(signIndex)];
+  const houseColor = (houseIndex: number) => ELEMENT_VARS[ringColorIndex(houseIndex)];
+
+  // Zodiac sign names in order (Aries 0° = index 1)
+  const zodiacSignNames = ['pisces', 'aries', 'taurus', 'gemini', 'cancer', 'leo', 'virgo', 'libra', 'scorpio', 'sagittarius', 'capricorn', 'aquarius'];
+  const signNameFromDegree = (deg: number) => zodiacSignNames[(Math.floor(((deg % 360) + 360) % 360 / 30) + 1) % 12];
+
   // Default house cusps (every 30 degrees if not provided)
   const defaultHouseCusps = $derived(
     houseCusps.length === 12 
@@ -107,17 +77,22 @@
       : Array.from({ length: 12 }, (_, i) => i * 30)
   );
   
-  // Default planet positions if not provided
+  // Default planet positions if not provided (fallback only)
   const defaultPlanets = $derived({
-    sun: { degrees: 120, sign: '♒', house: 12 },
-    moon: { degrees: 45, sign: '♒', house: 10 },
-    mercury: { degrees: 100, sign: '♒', house: 8 },
-    venus: { degrees: 200, sign: '♒', house: 6 },
-    mars: { degrees: 300, sign: '♒', house: 4 },
-    jupiter: { degrees: 40, sign: '♒', house: 2 }
+    sun: { degrees: 120, sign: 'aquarius', house: 12 },
+    moon: { degrees: 45, sign: 'aquarius', house: 10 },
+    mercury: { degrees: 100, sign: 'aquarius', house: 8 },
+    venus: { degrees: 200, sign: 'aquarius', house: 6 },
+    mars: { degrees: 300, sign: 'aquarius', house: 4 },
+    jupiter: { degrees: 40, sign: 'aquarius', house: 2 }
   });
   
-  const planets = $derived({ ...defaultPlanets, ...planetPositions });
+  // Use provided positions if available, otherwise use defaults
+  const planets = $derived<Record<string, { degrees: number; sign: string; house?: number }>>(
+    Object.keys(planetPositions).length > 0
+      ? planetPositions
+      : defaultPlanets
+  );
   
   // Convert degrees to radians
   function degToRad(deg: number): number {
@@ -173,31 +148,7 @@
     const minutes = Math.floor((signDeg % 1) * 60);
     return `${Math.floor(signDeg)}° ${minutes}'`;
   }
-  
-  // Format another degree id
-  function formatDegreeId(planet: { degrees: number; sign: string }): string {
-    const signDeg = planet.degrees % 30;
-    const minutes = Math.floor((signDeg % 1) * 60);
-    return `${Math.floor(signDeg)}° ${planet.sign} ${minutes}°`;
-  }
-  
-  // Helper to check if content is SVG markup
-  function isSvgMarkup(content: string): boolean {
-    return content.trim().startsWith('<svg') || content.trim().startsWith('<?xml');
-  }
-  
-  // Get glyph content (handles both Unicode and SVG markup)
-  function getGlyphContent(id: string): { type: 'unicode' | 'svg'; content: string } {
-    const glyph = glyphs[id];
-    if (!glyph) return { type: 'unicode', content: '' };
-    
-    const svg = glyph.svg;
-    if (isSvgMarkup(svg)) {
-      return { type: 'svg', content: svg };
-    }
-    return { type: 'unicode', content: svg };
-  }
-  
+
   // SVG element reference
   let svgElement: SVGElement | undefined;
 </script>
@@ -216,57 +167,101 @@
     cy={centerY}
     r={outerBorderRadius}
     fill="none"
-    stroke="currentColor"
-    stroke-width={partSize * 0.3}
-    opacity="0.4"
+    stroke="rgba(135, 206, 235, 0.65)"
+    stroke-width={partSize * 0.15}
   />
-  
-  <!-- Part 2: Zodiac strip with colored background + sign glyphs -->
-  {#each zodiacSigns as sign, i}
-    {@const startDeg = sign.degrees - 15}
-    {@const endDeg = sign.degrees + 15}
-    <path
-      d={createArc(startDeg, endDeg, zodiacStripInner, zodiacStripOuter)}
-      fill={zodiacColors[i]}
-      opacity="0.6"
-    />
-    {@const pos = polarToCartesian((zodiacStripInner + zodiacStripOuter) / 2, sign.degrees)}
-    {@const glyphData = getGlyphContent(sign.name)}
-    <g transform={`translate(${pos.x}, ${pos.y})`}>
+
+  <!-- 5% Houses ring (outermost) -->
+  {#each defaultHouseCusps as cusp, i}
+    {@const nextCusp = defaultHouseCusps[(i + 1) % 12] ?? cusp + 30}
+    {@const startDeg = cusp}
+    {@const endDeg = nextCusp < cusp ? nextCusp + 360 : nextCusp}
+    {@const span = endDeg - startDeg}
+    {@const color = houseColor(i)}
+    {@const sub1 = startDeg}
+    {@const sub2 = startDeg + span / 3}
+    {@const sub3 = startDeg + (span * 2) / 3}
+    {@const sub4 = endDeg}
+    <path d={createArc(sub1, sub2, housesInner, housesOuter)} fill={color} fill-opacity="0.85" stroke="rgba(135, 206, 235, 0.4)" stroke-width="0.25" />
+    <path d={createArc(sub2, sub3, housesInner, housesOuter)} fill={color} fill-opacity="0.85" stroke="rgba(135, 206, 235, 0.4)" stroke-width="0.25" />
+    <path d={createArc(sub3, sub4, housesInner, housesOuter)} fill={color} fill-opacity="0.85" stroke="rgba(135, 206, 235, 0.4)" stroke-width="0.25" />
+  {/each}
+
+  <!-- 40% Dark blue band (main chart area) -->
+  <defs>
+    <mask id="darkBlueRingMask">
+      <rect width={size} height={size} fill="white"/>
+      <circle cx={centerX} cy={centerY} r={darkBlueInner} fill="black"/>
+    </mask>
+  </defs>
+  <circle cx={centerX} cy={centerY} r={darkBlueOuter} fill="rgba(30, 58, 95, 0.8)" stroke="none" mask="url(#darkBlueRingMask)" />
+
+  <!-- Second outer circle – divided into 3 parts per house, signed I. II. III. -->
+  {#each defaultHouseCusps as cusp, i}
+    {@const nextCusp = defaultHouseCusps[(i + 1) % 12] ?? cusp + 30}
+    {@const startDeg = cusp}
+    {@const endDeg = nextCusp < cusp ? nextCusp + 360 : nextCusp}
+    {@const span = endDeg - startDeg}
+    {@const signIdx = (Math.floor(((cusp % 360) + 360) % 360 / 30) + 1) % 12}
+    {@const sub1 = startDeg}
+    {@const sub2 = startDeg + span / 3}
+    {@const sub3 = startDeg + (span * 2) / 3}
+    {@const sub4 = endDeg}
+    {@const segmentColor = houseColor(i)}
+    <path d={createArc(sub1, sub2, zodiacStripInner, zodiacStripOuter)} fill={segmentColor} fill-opacity="1" stroke="rgba(135, 206, 235, 0.5)" stroke-width="0.6" />
+    <path d={createArc(sub2, sub3, zodiacStripInner, zodiacStripOuter)} fill={segmentColor} fill-opacity="1" stroke="rgba(135, 206, 235, 0.5)" stroke-width="0.6" />
+    <path d={createArc(sub3, sub4, zodiacStripInner, zodiacStripOuter)} fill={segmentColor} fill-opacity="1" stroke="rgba(135, 206, 235, 0.5)" stroke-width="0.6" />
+    {@const partLabels = ['I.', 'II.', 'III.']}
+    {#each [sub1, sub2, sub3] as subStart, partIndex}
+      {@const subEnd = partIndex === 0 ? sub2 : partIndex === 1 ? sub3 : sub4}
+      {@const partCenterDeg = subStart + (subEnd - subStart) / 2}
+      {@const labelPos = polarToCartesian((zodiacStripInner + zodiacStripOuter) / 2, partCenterDeg)}
+      <text
+        x={labelPos.x}
+        y={labelPos.y}
+        text-anchor="middle"
+        dominant-baseline="middle"
+        font-size={Math.max(8, partSize * 0.55)}
+        fill="currentColor"
+        opacity="0.95"
+      >
+        {partLabels[partIndex]}
+      </text>
+    {/each}
+    {@const centerDeg = startDeg + span / 2}
+    {@const signName = signNameFromDegree(cusp)}
+    {@const pos = polarToCartesian(zodiacStripGlyphRadius, centerDeg)}
+    {@const glyphData = getGlyphContent(signName)}
+    <g transform={`translate(${pos.x}, ${pos.y}) rotate(${centerDeg})`}>
       {#if glyphData.type === 'svg'}
         {@html glyphData.content}
+      {:else if glyphData.type === 'file'}
+        {#if failedGlyphFiles[`zstrip:${signName}:${glyphData.content}`]}
+          <text x="0" y="0" text-anchor="middle" dominant-baseline="middle" font-size={zodiacStripGlyphSize} fill="currentColor" opacity="0.9">
+            {glyphData.fallback || signName.slice(0, 2).toUpperCase()}
+          </text>
+        {:else}
+          <image
+            href={glyphData.content}
+            x={-zodiacStripGlyphSize / 2}
+            y={-zodiacStripGlyphSize / 2}
+            width={zodiacStripGlyphSize}
+            height={zodiacStripGlyphSize}
+            opacity="0.95"
+            onerror={() => {
+              failedGlyphFiles[`zstrip:${signName}:${glyphData.content}`] = true;
+              failedGlyphFiles = { ...failedGlyphFiles };
+            }}
+          />
+        {/if}
       {:else}
-        <text
-          x="0"
-          y="0"
-          text-anchor="middle"
-          dominant-baseline="middle"
-          font-size={partSize * 0.8}
-          fill="currentColor"
-          opacity="0.9"
-        >
-          {glyphData.content || sign.name.charAt(0).toUpperCase()}
+        <text x="0" y="0" text-anchor="middle" dominant-baseline="middle" font-size={zodiacStripGlyphSize} fill="currentColor" opacity="0.9">
+          {glyphData.content || signName.charAt(0).toUpperCase()}
         </text>
       {/if}
     </g>
   {/each}
-  
-  <!-- Parts 3-6: Grey area between outer strip and center strip (ring shape) -->
-  <defs>
-    <mask id="greyRingMask">
-      <rect width={size} height={size} fill="white"/>
-      <circle cx={centerX} cy={centerY} r={houseStripOuter} fill="black"/>
-    </mask>
-  </defs>
-  <circle
-    cx={centerX}
-    cy={centerY}
-    r={zodiacStripInner}
-    fill="rgba(128, 128, 128, 0.25)"
-    stroke="none"
-    mask="url(#greyRingMask)"
-  />
-  
+
   <!-- House cusp lines (from center to outer) -->
   {#each defaultHouseCusps as cusp}
     {@const outerPos = polarToCartesian(outerBorderRadius, cusp)}
@@ -276,7 +271,7 @@
       y1={innerPos.y}
       x2={outerPos.x}
       y2={outerPos.y}
-      stroke="rgba(100, 100, 100, 0.3)"
+      stroke="rgba(135, 206, 235, 0.5)"
       stroke-width="0.5"
     />
   {/each}
@@ -291,6 +286,35 @@
         <g class="planet-glyph" data-planet={planetName}>
           {@html planetGlyphData.content}
         </g>
+      {:else if planetGlyphData.type === 'file'}
+        {#if failedGlyphFiles[`planet:${planetName}:${planetGlyphData.content}`]}
+          <text
+            x="0"
+            y="0"
+            text-anchor="middle"
+            dominant-baseline="middle"
+            font-size={partSize * 0.7}
+            fill="currentColor"
+            class="planet-glyph"
+            data-planet={planetName}
+          >
+            {planetGlyphData.fallback || planetName.slice(0, 2).toUpperCase()}
+          </text>
+        {:else}
+          <image
+            href={planetGlyphData.content}
+            x={-planetGlyphData.size / 2}
+            y={-planetGlyphData.size / 2}
+            width={planetGlyphData.size}
+            height={planetGlyphData.size}
+            class="planet-glyph"
+            data-planet={planetName}
+            onerror={() => {
+              failedGlyphFiles[`planet:${planetName}:${planetGlyphData.content}`] = true;
+              failedGlyphFiles = { ...failedGlyphFiles };
+            }}
+          />
+        {/if}
       {:else}
         <text
           x="0"
@@ -307,103 +331,40 @@
       {/if}
     </g>
     
-    <!-- Position 4: Precise angle -->
+    <!-- Degree/minute label (single line per planet) -->
     {@const anglePos = polarToCartesian(angleTextRadius, planetData.degrees)}
     <text
       x={anglePos.x}
       y={anglePos.y}
       text-anchor="middle"
       dominant-baseline="middle"
-      font-size={partSize * 0.5}
+      font-size={Math.max(11, partSize * 1.35)}
       fill="currentColor"
       opacity="0.8"
     >
       {formatPreciseAngle(planetData)}
     </text>
-    
-    <!-- Position 5: Sign glyph -->
-    {@const signPos = polarToCartesian(signGlyphRadius, planetData.degrees)}
-    {@const signGlyphData = getGlyphContent(planetData.sign.toLowerCase())}
-    <g transform={`translate(${signPos.x}, ${signPos.y})`}>
-      {#if signGlyphData.type === 'svg'}
-        {@html signGlyphData.content}
-      {:else}
-        <text
-          x="0"
-          y="0"
-          text-anchor="middle"
-          dominant-baseline="middle"
-          font-size={partSize * 0.8}
-          fill="currentColor"
-          opacity="0.9"
-        >
-          {signGlyphData.content || planetData.sign}
-        </text>
-      {/if}
-    </g>
-    
-    <!-- Position 6: Another degree id -->
-    {@const degreePos = polarToCartesian(degreeTextRadius, planetData.degrees)}
-    <text
-      x={degreePos.x}
-      y={degreePos.y}
-      text-anchor="middle"
-      dominant-baseline="middle"
-      font-size={partSize * 0.5}
-      fill="currentColor"
-      opacity="0.7"
-    >
-      {formatDegreeId(planetData)}
-    </text>
   {/each}
   
-  <!-- Part 7: Strip with background containing house numbers -->
+  <!-- Rest: Inner circle (54% → 0) – single color -->
   <circle
     cx={centerX}
     cy={centerY}
-    r={houseStripOuter}
-    fill="rgba(100, 100, 100, 0.3)"
-    stroke="currentColor"
+    r={innerCircleRadius}
+    fill="rgba(80, 80, 95, 0.55)"
+    stroke="rgba(135, 206, 235, 0.45)"
     stroke-width="1"
-    opacity="0.4"
   />
-  <circle
-    cx={centerX}
-    cy={centerY}
-    r={houseStripInner}
-    fill="rgba(0, 0, 0, 0.1)"
-    stroke="none"
-  />
-  
-  <!-- House numbers (in strip 7) -->
-  {#each defaultHouseCusps as cusp, i}
-    {@const houseNum = i + 1}
-    {@const nextCusp = defaultHouseCusps[(i + 1) % 12] || cusp + 30}
-    {@const midCusp = (cusp + nextCusp) / 2}
-    {@const pos = polarToCartesian((houseStripInner + houseStripOuter) / 2, midCusp)}
-    <text
-      x={pos.x}
-      y={pos.y}
-      text-anchor="middle"
-      dominant-baseline="middle"
-      font-size={partSize * 0.7}
-      fill="currentColor"
-      opacity="0.9"
-      font-weight="600"
-    >
-      {houseNum}
-    </text>
-  {/each}
-  
-  <!-- Parts 8-10: Dark center piece with relations (aspects) -->
+
+  <!-- Dark center (aspects) -->
   <circle
     cx={centerX}
     cy={centerY}
     r={centerDarkOuter}
-    fill="rgba(0, 0, 0, 0.4)"
-    stroke="currentColor"
+    fill="rgba(0, 0, 0, 0.45)"
+    stroke="rgba(135, 206, 235, 0.55)"
     stroke-width="1"
-    opacity="0.5"
+    opacity="0.6"
   />
   
   <!-- Aspect/Transit lines (inside dark center) -->

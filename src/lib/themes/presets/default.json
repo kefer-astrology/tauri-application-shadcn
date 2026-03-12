@@ -16,7 +16,14 @@
     "muted-foreground": "oklch(0.556 0 0)",
     "border": "oklch(0.922 0 0)",
     "input": "oklch(0.922 0 0)",
-    "ring": "oklch(0.708 0 0)"
+    "ring": "oklch(0.708 0 0)",
+    "panel": "#1a2556",
+    "panel-header": "#002e60",
+    "panel-foreground": "#ffffff",
+    "element-fire": "#5a5a64",
+    "element-earth": "#4a3f35",
+    "element-air": "#1e3d38",
+    "element-water": "#5c2a2a"
   },
   "dark": {
     "background": "oklch(0.145 0 0)",
@@ -33,6 +40,13 @@
     "muted-foreground": "oklch(0.708 0 0)",
     "border": "oklch(1 0 0 / 10%)",
     "input": "oklch(1 0 0 / 15%)",
-    "ring": "oklch(0.556 0 0)"
+    "ring": "oklch(0.556 0 0)",
+    "panel": "#1a2556",
+    "panel-header": "#002e60",
+    "panel-foreground": "#ffffff",
+    "element-fire": "#5a5a64",
+    "element-earth": "#4a3f35",
+    "element-air": "#1e3d38",
+    "element-water": "#5c2a2a"
   }
 }

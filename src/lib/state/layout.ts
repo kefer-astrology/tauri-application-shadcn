@@ -6,10 +6,14 @@ export {
   type Tab, 
   type Mode, 
   type ChartData,
+  type WorkspaceDefaultsState,
   setMode, 
   showOpenExportOverlay, 
   addContext,
+  setWorkspaceDefaults,
+  resetWorkspaceDefaults,
   loadChartsFromWorkspace,
   getSelectedChart,
-  updateChartComputation
+  updateChartComputation,
+  chartDataToComputePayload
 } from './layout.svelte';

@@ -8,7 +8,7 @@
   import GlyphManager from '$lib/components/GlyphManager.svelte';
   import { layout, type Mode, showOpenExportOverlay, loadChartsFromWorkspace, updateChartComputation, getSelectedChart, chartDataToComputePayload, type ChartData, setMode, setWorkspaceDefaults } from '$lib/state/layout';
   import { invoke } from '@tauri-apps/api/core';
-  import { reapplyCurrentPreset, preset, presets, applyPreset } from '$lib/state/theme.svelte';
+  import { reapplyCurrentPreset, preset, presets, applyPreset, getElementColors, setElementColor, type ElementColorKey } from '$lib/state/theme.svelte';
   import { timeNavigation } from '$lib/stores/timeNavigation.svelte';
   import { t, i18n, setLang } from '$lib/i18n/index.svelte';
   import * as Breadcrumb from '$lib/components/ui/breadcrumb/index.js';
@@ -17,8 +17,9 @@
   import { Button } from '$lib/components/ui/button/index.js';
   import { Input } from '$lib/components/ui/input/index.js';
   import { Textarea } from '$lib/components/ui/textarea/index.js';
-  import { getGlyphContent, glyphSettings, glyphSetOptions, setGlyphSet, hardResetGlyphStorage, type GlyphSetId } from '$lib/stores/glyphs.svelte';
+  import { getGlyphContent, signIdFromLongitude, glyphSettings, glyphSetOptions, setGlyphSet, hardResetGlyphStorage, type GlyphSetId } from '$lib/stores/glyphs.svelte';
   import BodySelector from '$lib/components/BodySelector.svelte';
+  import PanelMenu from '$lib/components/PanelMenu.svelte';
   import * as Dialog from '$lib/components/ui/dialog/index.js';
   import { onMount } from 'svelte';
   import { stepForward, stepBackward } from '$lib/stores/timeNavigation.svelte';
@@ -36,7 +37,7 @@
   const isRadixLikeMode = $derived(mode === 'radix_view' || mode === 'new_radix');
 
   // New Radix form state
-  let newChartType = $state<'NATAL' | 'EVENT' | 'HORARY' | 'COMPOSITE'>('NATAL');
+  let newChartType = $state<string>('NATAL');
   let newContextName = $state('');
   let newDate = $state('');
   let newTime = $state('');
@@ -53,14 +54,20 @@
   let openMode = $state<'my_radixes' | 'database'>('my_radixes');
   let searchQuery = $state('');
 
+  // Keep new radix type always selected (PanelMenu can clear on second click)
+  $effect(() => {
+    if (mode === 'new_radix' && (newChartType === undefined || newChartType === '')) {
+      newChartType = 'NATAL';
+    }
+  });
+
   // Bootstrap a real "current sky" chart when app starts with no charts.
   // This avoids an empty Radix on fresh launch and triggers real computation.
   $effect(() => {
     if (layout.contexts.length > 0) return;
 
     const now = new Date();
-    const nowLocal = new Date(now.getTime() - now.getTimezoneOffset() * 60_000);
-    const dateTime = nowLocal.toISOString().slice(0, 19);
+    const dateTime = now.toISOString().slice(0, 19) + 'Z';
     const defaultTimezone = layout.workspaceDefaults.timezone || 'UTC';
     const defaultEngine = layout.workspaceDefaults.engine || 'swisseph';
     const defaultLat = Number.isFinite(layout.workspaceDefaults.locationLatitude)
@@ -132,6 +139,17 @@
   // Settings mode state
   let selectedSettingsSection = $state<string | undefined>('jazyk');
   let settingsChanged = $state(false);
+
+  // Dynamic / Revolution mode state (left menu selection)
+  let selectedDynamicSection = $state<string | undefined>(undefined);
+  let selectedRevolutionSection = $state<string | undefined>(undefined);
+  // Element colors (radix chart) – synced from theme store when opening Vzhled
+  let elementColors = $state<Record<ElementColorKey, string>>({
+    'element-fire': '#5a5a64',
+    'element-earth': '#4a3f35',
+    'element-air': '#1e3d38',
+    'element-water': '#5c2a2a',
+  });
   
   // Language and preset state for settings
   const languages = $derived(
@@ -165,17 +183,17 @@
   }
   let langValue = $state(String(i18n.lang));
   const langTriggerContent = $derived(
-    languages.find((l) => l.value === langValue)?.label ?? 'Select language'
+    languages.find((l) => l.value === langValue)?.label ?? t('select_language', {}, 'Select language')
   );
   
   const presetItems = presets.map((p) => ({ value: p.id, label: p.name }));
   let presetValue = $state(String(preset.id));
   const presetTriggerContent = $derived(
-    presetItems.find((p) => p.value === presetValue)?.label ?? 'Select preset'
+    presetItems.find((p) => p.value === presetValue)?.label ?? t('select_preset', {}, 'Select preset')
   );
   let glyphSetValue = $state(String(glyphSettings.activeSet));
   const glyphSetTriggerContent = $derived(
-    glyphSetOptions.find((s) => s.id === glyphSetValue)?.label ?? 'Select glyph set'
+    glyphSetOptions.find((s) => s.id === glyphSetValue)?.label ?? t('select_glyph_set', {}, 'Select glyph set')
   );
   
   // Sync language changes
@@ -206,63 +224,101 @@
       settingsChanged = true;
     }
   });
-  
-  // Info items structure
-  const infoItems = $state([
+
+  $effect(() => {
+    if (selectedSettingsSection === 'vzhled') {
+      elementColors = { ...getElementColors() };
+    }
+  });
+
+  // Info items structure (all labels translatable)
+  const infoItems = $derived([
     {
       id: 'positive_dominances',
-      label: 'Převahy pozitivní',
+      label: t('info_positive_dominances', {}, 'Positive dominances'),
       children: [
-        { id: 'dominance_mode_quality', label: 'Převaha modu/kvality znamení' },
-        { id: 'dominance_element', label: 'Převaha živlu' },
-        { id: 'dominance_houses', label: 'Převaha v domech' },
-        { id: 'dominance_aspects', label: 'Převaha aspektů' }
+        { id: 'dominance_mode_quality', label: t('info_dominance_mode_quality', {}, 'Sign mode/quality dominance') },
+        { id: 'dominance_element', label: t('info_dominance_element', {}, 'Element dominance') },
+        { id: 'dominance_houses', label: t('info_dominance_houses', {}, 'House dominance') },
+        { id: 'dominance_aspects', label: t('info_dominance_aspects', {}, 'Aspect dominance') }
       ]
     },
     {
       id: 'negative_dynamics',
-      label: 'Negativní dynamika',
+      label: t('info_negative_dynamics', {}, 'Negative dynamics'),
       children: [
-        { id: 'negative_quality_signs', label: 'Kvalita znamení' },
-        { id: 'negative_elements', label: 'Živlu' },
-        { id: 'negative_houses', label: 'V domech' },
-        { id: 'negative_aspects', label: 'Aspektů' }
+        { id: 'negative_quality_signs', label: t('info_negative_quality_signs', {}, 'Sign quality') },
+        { id: 'negative_elements', label: t('info_negative_elements', {}, 'Elements') },
+        { id: 'negative_houses', label: t('info_negative_houses', {}, 'Houses') },
+        { id: 'negative_aspects', label: t('info_negative_aspects', {}, 'Aspects') }
       ]
     },
-    { id: 'quadrant_division', label: 'Rozdělení v kvadrantech' },
-    { id: 'sabian_symbols', label: 'Sabiánské symboly' },
-    { id: 'detailed_planet_positions', label: 'Detailní informace o poloze planet (starfisher - rozšířené info)' },
-    { id: 'horoscope_shape_diagram', label: 'Tvarový diagram horoskopu' },
-    { id: 'hemisphere_emphasis', label: 'Zdůraznění hemisféry' },
-    { id: 'singleton_hemisphere', label: 'Singlton v hemisféře' },
-    { id: 'stellium', label: 'Stellium' },
-    { id: 'planetary_configuration', label: 'Planetární konfigurace' },
-    { id: 'lunar_phases', label: 'Lunární fáze' },
-    { id: 'sun_moon_horizon', label: 'Slunce a Luna (obzor)' },
-    { id: 'mercury', label: 'Merkur' },
-    { id: 'venus', label: 'Venuše' },
-    { id: 'extroversion_introversion_ratio', label: 'Poměr extroverze a introverze' },
+    { id: 'quadrant_division', label: t('info_quadrant_division', {}, 'Quadrant division') },
+    { id: 'sabian_symbols', label: t('info_sabian_symbols', {}, 'Sabian symbols') },
+    { id: 'detailed_planet_positions', label: t('info_detailed_planet_positions', {}, 'Detailed planet positions') },
+    { id: 'horoscope_shape_diagram', label: t('info_horoscope_shape_diagram', {}, 'Horoscope shape diagram') },
+    { id: 'hemisphere_emphasis', label: t('info_hemisphere_emphasis', {}, 'Hemisphere emphasis') },
+    { id: 'singleton_hemisphere', label: t('info_singleton_hemisphere', {}, 'Singleton in hemisphere') },
+    { id: 'stellium', label: t('info_stellium', {}, 'Stellium') },
+    { id: 'planetary_configuration', label: t('info_planetary_configuration', {}, 'Planetary configuration') },
+    { id: 'lunar_phases', label: t('info_lunar_phases', {}, 'Lunar phases') },
+    { id: 'sun_moon_horizon', label: t('info_sun_moon_horizon', {}, 'Sun and Moon (horizon)') },
+    { id: 'mercury', label: t('info_mercury', {}, 'Mercury') },
+    { id: 'venus', label: t('info_venus', {}, 'Venus') },
+    { id: 'extroversion_introversion_ratio', label: t('info_extroversion_introversion_ratio', {}, 'Extraversion–introversion ratio') },
     {
       id: 'focal_planets',
-      label: 'Ohniskové planety',
+      label: t('info_focal_planets', {}, 'Focal planets'),
       children: [
-        { id: 'final_dispositor', label: 'Finální dispozitor' },
-        { id: 'horoscope_ruler', label: 'Vládce horoskopu' },
-        { id: 'singleton', label: 'Singlton' },
-        { id: 'angular_planet', label: 'Rohová planeta' },
-        { id: 'by_position', label: 'Polohou' },
-        { id: 'unaspect_planets', label: 'Neaspektované planety (žádné hlavní aspekty)' },
-        { id: 'focal_planet', label: 'Obráběcí planeta' },
-        { id: 'trigger_planet', label: 'Planeta spouštěcí' },
-        { id: 'planets_abstract_points', label: 'Planety v kontaktu s abstraktními body horoskopu' }
+        { id: 'final_dispositor', label: t('info_final_dispositor', {}, 'Final dispositor') },
+        { id: 'horoscope_ruler', label: t('info_horoscope_ruler', {}, 'Chart ruler') },
+        { id: 'singleton', label: t('info_singleton', {}, 'Singleton') },
+        { id: 'angular_planet', label: t('info_angular_planet', {}, 'Angular planet') },
+        { id: 'by_position', label: t('info_by_position', {}, 'By position') },
+        { id: 'unaspect_planets', label: t('info_unaspect_planets', {}, 'Unaspected planets') },
+        { id: 'focal_planet', label: t('info_focal_planet', {}, 'Focal planet') },
+        { id: 'trigger_planet', label: t('info_trigger_planet', {}, 'Trigger planet') },
+        { id: 'planets_abstract_points', label: t('info_planets_abstract_points', {}, 'Planets and abstract points') }
       ]
     }
   ]);
-  
+
+  const settingsMenuItems = $derived([
+    { id: 'jazyk', label: t('section_jazyk', {}, 'Language') },
+    { id: 'lokace', label: t('section_lokace', {}, 'Location') },
+    { id: 'system_domu', label: t('section_system_domu', {}, 'House system') },
+    { id: 'nastaveni_aspektu', label: t('section_nastaveni_aspektu', {}, 'Aspect settings') },
+    { id: 'vzhled', label: t('section_vzhled', {}, 'Appearance') },
+    { id: 'manual', label: t('section_manual', {}, 'Manual') },
+  ]);
+
+  const transitsMenuItems = $derived([
+    { id: 'obecne', label: t('transits_menu_general', {}, 'General') },
+    { id: 'transiting', label: t('transits_menu_transiting', {}, 'Transiting bodies') },
+    { id: 'transited', label: t('transits_menu_transited', {}, 'Transited bodies') },
+    { id: 'aspects', label: t('transits_menu_aspects_used', {}, 'Aspects used') },
+  ]);
+
+  const newRadixMenuItems = $derived([
+    { id: 'NATAL', label: t('new_type_radix', {}, 'Radix') },
+    { id: 'EVENT', label: t('new_type_event', {}, 'Event') },
+    { id: 'HORARY', label: t('new_type_horary', {}, 'Horary') },
+    { id: 'COMPOSITE', label: t('new_type_composite', {}, 'Composite') },
+  ]);
+
+  const dynamicMenuItems = $derived([
+    { id: 'overview', label: t('overview', {}, 'Overview') },
+    { id: 'charts', label: t('charts', {}, 'Charts') },
+  ]);
+
+  const revolutionMenuItems = $derived([
+    { id: 'solar', label: t('revolution_solar', {}, 'Solar') },
+    { id: 'lunar', label: t('revolution_lunar', {}, 'Lunar') },
+  ]);
+
   // Planet positions for right Radix table
   // Get planets from selected chart's computed data, or use defaults
   const selectedChart = $derived(getSelectedChart());
-  const zodiacSymbols = ['♈', '♉', '♊', '♋', '♌', '♍', '♎', '♏', '♐', '♑', '♒', '♓'];
   const defaultBodyOrder = [
     'sun', 'moon', 'mercury', 'venus', 'mars', 'jupiter', 'saturn', 'uranus', 'neptune', 'pluto',
     'asc', 'mc', 'ic', 'desc', 'north_node', 'south_node', 'lilith', 'chiron'
@@ -326,24 +382,23 @@
     };
   }
 
-  const planets = $derived(() => {
+  const planets = $derived.by(() => {
     const computed = selectedChart?.computed?.positions;
     if (!computed) {
       return {};
     }
 
-    const result: Record<string, { longitude: number; sign: string; house: number; positionInHouse: number }> = {};
+    const result: Record<string, { longitude: number; signName: string; house: number; positionInHouse: number }> = {};
     const computedRecord = computed as Record<string, unknown>;
     const cusps = getHouseCusps(computedRecord);
     for (const [name, position] of Object.entries(computedRecord)) {
       if (/^house_\d+$/i.test(name)) continue;
       const longitude = toLongitude(position);
       if (longitude == null) continue;
-      const signIndex = Math.floor(longitude / 30);
       const { house, positionInHouse } = locateHouse(longitude, cusps);
       result[name] = {
         longitude,
-        sign: zodiacSymbols[signIndex] || '♈',
+        signName: signIdFromLongitude(longitude),
         house,
         positionInHouse,
       };
@@ -363,9 +418,7 @@
     return Object.fromEntries(orderedEntries);
   });
 
-  const planetRows = $derived.by(() => {
-    return Object.entries(planets ?? {});
-  });
+  const planetRows = $derived.by(() => Object.entries(planets ?? {}));
   
   // Chart details for left expander: always show selected chart fields with sensible display defaults
   const chartDetails = $derived.by(() => {
@@ -433,7 +486,7 @@
     newHouseSystem = chart.houseSystem || 'Placidus';
     newZodiacType = chart.zodiacType || 'Tropical';
     newTags = chart.tags.join(', ');
-    newChartType = chart.chartType as typeof newChartType;
+    newChartType = chart.chartType ?? 'NATAL';
   }
 
   function applyFormReset() {
@@ -500,7 +553,7 @@
     return {
       id: chartId,
       name: newContextName.trim(),
-      chartType: newChartType,
+      chartType: newChartType as 'NATAL' | 'EVENT' | 'HORARY' | 'COMPOSITE',
       dateTime,
       location: nonEmptyOr(newLocation, wsDefaults.locationName),
       latitude,
@@ -616,7 +669,7 @@
     <!-- Left 20% + middle stretched to 80% -->
     <section class="row-span-1 grid gap-x-3 gap-y-3 px-3 pb-3 overflow-hidden w-full" style:grid-template-columns="minmax(0,20%) minmax(0,80%)">
       <!-- Left single panel -->
-      <div class="h-full min-w-0 flex flex-col gap-2 min-h-0">
+      <div class="h-full min-w-0 flex flex-col gap-2 min-h-0 bg-panel rounded-md overflow-hidden">
         <div class="min-h-0 flex-1">
           <ExpandablePanel 
             title={
@@ -632,43 +685,7 @@
           >
             {#snippet children()}
               {#if mode === 'new_radix'}
-                {@const chartTypes = [
-                  { value: 'NATAL', label: t('new_type_radix', {}, 'Radix') },
-                  { value: 'EVENT', label: t('new_type_event', {}, 'Event') },
-                  { value: 'HORARY', label: t('new_type_horary', {}, 'Horary') },
-                  { value: 'COMPOSITE', label: t('new_type_composite', {}, 'Composite') }
-                ]}
-                <div class="space-y-3">
-                  <div class="text-xs font-medium opacity-75 mb-2">{t('new_type', {}, 'Type')}</div>
-                  <Breadcrumb.Root>
-                    <Breadcrumb.List class="flex flex-col gap-1.5">
-                      {#each chartTypes as type, i}
-                        <Breadcrumb.Item>
-                          {#if newChartType === type.value}
-                            <Breadcrumb.Page 
-                              class="px-2 py-1.5 text-sm font-semibold underline underline-offset-4 text-foreground"
-                            >
-                              {type.label}
-                            </Breadcrumb.Page>
-                          {:else}
-                            <Breadcrumb.Link>
-                              {#snippet child({ props })}
-                                <Button
-                                  type="button"
-                                  variant="ghost"
-                                  class={`${props.class ?? ''} px-2 py-1.5 text-sm text-foreground/80 bg-transparent hover:bg-transparent hover:underline transition-colors w-full text-left rounded-md`}
-                                  onclick={() => newChartType = type.value as typeof newChartType}
-                                >
-                                  {type.label}
-                                </Button>
-                              {/snippet}
-                            </Breadcrumb.Link>
-                          {/if}
-                        </Breadcrumb.Item>
-                      {/each}
-                    </Breadcrumb.List>
-                  </Breadcrumb.Root>
-                </div>
+                <PanelMenu items={newRadixMenuItems} bind:selectedId={newChartType} />
               {:else if mode === 'open'}
                 {@const openModes = [
                   { value: 'my_radixes', label: t('open_mode_my_radixes', {}, 'My Radixes') },
@@ -681,7 +698,7 @@
                         <Breadcrumb.Item>
                           {#if openMode === modeItem.value}
                             <Breadcrumb.Page 
-                              class="px-2 py-1.5 text-sm font-semibold underline underline-offset-4 text-foreground"
+                              class="px-2 py-1.5 text-sm font-semibold underline underline-offset-4 text-panel-foreground"
                             >
                               {modeItem.label}
                             </Breadcrumb.Page>
@@ -691,7 +708,7 @@
                                 <Button
                                   type="button"
                                   variant="ghost"
-                                  class={`${props.class ?? ''} px-2 py-1.5 text-sm text-foreground/80 bg-transparent hover:bg-transparent hover:underline transition-colors w-full text-left rounded-md`}
+                                  class={`${props.class ?? ''} px-2 py-1.5 text-sm text-panel-foreground/80 bg-transparent hover:bg-transparent hover:underline transition-colors w-full text-left rounded-md`}
                                   onclick={() => openMode = modeItem.value as typeof openMode}
                                 >
                                   {modeItem.label}
@@ -717,7 +734,7 @@
                         <Breadcrumb.Item>
                           {#if exportType === typeItem.value}
                             <Breadcrumb.Page 
-                              class="px-2 py-1.5 text-sm font-semibold underline underline-offset-4 text-foreground"
+                              class="px-2 py-1.5 text-sm font-semibold underline underline-offset-4 text-panel-foreground"
                             >
                               {typeItem.label}
                             </Breadcrumb.Page>
@@ -727,7 +744,7 @@
                                 <Button
                                   type="button"
                                   variant="ghost"
-                                  class={`${props.class ?? ''} px-2 py-1.5 text-sm text-foreground/80 bg-transparent hover:bg-transparent hover:underline transition-colors w-full text-left rounded-md`}
+                                  class={`${props.class ?? ''} px-2 py-1.5 text-sm text-panel-foreground/80 bg-transparent hover:bg-transparent hover:underline transition-colors w-full text-left rounded-md`}
                                   onclick={() => exportType = typeItem.value as typeof exportType}
                                 >
                                   {typeItem.label}
@@ -741,150 +758,13 @@
                   </Breadcrumb.Root>
                 </div>
               {:else if mode === 'info'}
-                <div class="space-y-1 text-sm max-h-full overflow-y-auto pr-1">
-                  {#each infoItems as item}
-                    {#if item.children}
-                      <!-- Item with children (expandable) -->
-                      {@const isExpanded = selectedInfoItem === item.id || item.children.some(c => selectedInfoItem === c.id)}
-                      {@const hasSelectedChild = item.children.some(c => selectedInfoItem === c.id)}
-                      <div class="space-y-0.5">
-                        <Button
-                          type="button"
-                          class={`w-full text-left px-2 py-1.5 text-sm rounded-md transition-colors ${
-                            hasSelectedChild
-                              ? 'font-semibold underline underline-offset-4 text-foreground bg-primary/10'
-                              : 'text-foreground/80 hover:bg-primary hover:text-primary-foreground'
-                          }`}
-                          onclick={() => {
-                            if (hasSelectedChild) {
-                              selectedInfoItem = undefined;
-                            } else {
-                              selectedInfoItem = item.id;
-                            }
-                          }}
-                        >
-                          {item.label}
-                        </Button>
-                        {#if isExpanded}
-                          <div class="pl-4 space-y-0.5">
-                            {#each item.children as child}
-                              <Button
-                                type="button"
-                                class={`w-full text-left px-2 py-1 text-xs rounded-md transition-colors ${
-                                  selectedInfoItem === child.id
-                                    ? 'font-semibold underline underline-offset-2 text-foreground bg-primary/10'
-                                    : 'text-foreground/70 hover:bg-primary/50 hover:text-primary-foreground'
-                                }`}
-                                onclick={() => selectedInfoItem = selectedInfoItem === child.id ? undefined : child.id}
-                              >
-                                {child.label}
-                              </Button>
-                            {/each}
-                          </div>
-                        {/if}
-                      </div>
-                    {:else}
-                      <!-- Single item -->
-                      <Button
-                        type="button"
-                        class={`w-full text-left px-2 py-1.5 text-sm rounded-md transition-colors ${
-                          selectedInfoItem === item.id
-                            ? 'font-semibold underline underline-offset-4 text-foreground bg-primary/10'
-                            : 'text-foreground/80 hover:bg-primary hover:text-primary-foreground'
-                        }`}
-                        onclick={() => selectedInfoItem = selectedInfoItem === item.id ? undefined : item.id}
-                      >
-                        {item.label}
-                      </Button>
-                    {/if}
-                  {/each}
-                </div>
+                <PanelMenu items={infoItems} bind:selectedId={selectedInfoItem} />
               {:else if mode === 'settings'}
-                <div class="space-y-1 text-sm max-h-full overflow-y-auto pr-1">
-                  <!-- Jazyk -->
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    class={`w-full text-left px-2 py-1.5 text-sm rounded-md transition-colors ${
-                      selectedSettingsSection === 'jazyk'
-                        ? 'font-semibold underline underline-offset-4 text-foreground bg-primary/10'
-                        : 'text-foreground/80 bg-transparent hover:bg-transparent hover:text-foreground hover:underline'
-                    }`}
-                    onclick={() => selectedSettingsSection = 'jazyk'}
-                  >
-                    Jazyk
-                  </Button>
-                  
-                  <!-- Lokace -->
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    class={`w-full text-left px-2 py-1.5 text-sm rounded-md transition-colors ${
-                      selectedSettingsSection === 'lokace'
-                        ? 'font-semibold underline underline-offset-4 text-foreground bg-primary/10'
-                        : 'text-foreground/80 bg-transparent hover:bg-transparent hover:text-foreground hover:underline'
-                    }`}
-                    onclick={() => selectedSettingsSection = 'lokace'}
-                  >
-                    Lokace
-                  </Button>
-                  
-                  <!-- Systém domů -->
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    class={`w-full text-left px-2 py-1.5 text-sm rounded-md transition-colors ${
-                      selectedSettingsSection === 'system_domu'
-                        ? 'font-semibold underline underline-offset-4 text-foreground bg-primary/10'
-                        : 'text-foreground/80 bg-transparent hover:bg-transparent hover:text-foreground hover:underline'
-                    }`}
-                    onclick={() => selectedSettingsSection = 'system_domu'}
-                  >
-                    Systém domů
-                  </Button>
-                  
-                  <!-- Nastavení aspektů -->
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    class={`w-full text-left px-2 py-1.5 text-sm rounded-md transition-colors ${
-                      selectedSettingsSection === 'nastaveni_aspektu'
-                        ? 'font-semibold underline underline-offset-4 text-foreground bg-primary/10'
-                        : 'text-foreground/80 bg-transparent hover:bg-transparent hover:text-foreground hover:underline'
-                    }`}
-                    onclick={() => selectedSettingsSection = 'nastaveni_aspektu'}
-                  >
-                    Nastavení aspektů
-                  </Button>
-                  
-                  <!-- Vzhled -->
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    class={`w-full text-left px-2 py-1.5 text-sm rounded-md transition-colors ${
-                      selectedSettingsSection === 'vzhled'
-                        ? 'font-semibold underline underline-offset-4 text-foreground bg-primary/10'
-                        : 'text-foreground/80 bg-transparent hover:bg-transparent hover:text-foreground hover:underline'
-                    }`}
-                    onclick={() => selectedSettingsSection = 'vzhled'}
-                  >
-                    Vzhled
-                  </Button>
-                  
-                  <!-- Manuál -->
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    class={`w-full text-left px-2 py-1.5 text-sm rounded-md transition-colors ${
-                      selectedSettingsSection === 'manual'
-                        ? 'font-semibold underline underline-offset-4 text-foreground bg-primary/10'
-                        : 'text-foreground/80 bg-transparent hover:bg-transparent hover:text-foreground hover:underline'
-                    }`}
-                    onclick={() => selectedSettingsSection = 'manual'}
-                  >
-                    Manuál
-                  </Button>
-                </div>
+                <PanelMenu items={settingsMenuItems} bind:selectedId={selectedSettingsSection} />
+              {:else if mode === 'dynamic'}
+                <PanelMenu items={dynamicMenuItems} bind:selectedId={selectedDynamicSection} />
+              {:else if mode === 'revolution'}
+                <PanelMenu items={revolutionMenuItems} bind:selectedId={selectedRevolutionSection} />
               {:else}
                 <div class="text-sm opacity-85">{t('mode_view_description', { mode: t(mode, {}, mode) }, 'Use the center panel for {mode} view.')}</div>
                 <div class="mt-4">
@@ -985,7 +865,7 @@
                   type="text"
                   class="w-full h-9 px-3 rounded-md bg-background text-foreground border"
                   bind:value={newTags}
-                  placeholder="e.g. personal, important"
+                  placeholder={t('placeholder_tags_example', {}, 'e.g. personal, important')}
                 />
               </div>
               
@@ -1005,13 +885,13 @@
                           <Input
                             type="text"
                             class="w-full h-8 px-2 rounded-md bg-background text-foreground border text-xs"
-                            placeholder="Latitude"
+                            placeholder={t('placeholder_latitude', {}, 'Latitude')}
                             bind:value={newLatitude}
                           />
                           <Input
                             type="text"
                             class="w-full h-8 px-2 rounded-md bg-background text-foreground border text-xs"
-                            placeholder="Longitude"
+                            placeholder={t('placeholder_longitude', {}, 'Longitude')}
                             bind:value={newLongitude}
                           />
                         </div>
@@ -1071,7 +951,7 @@
                         <Input
                           type="text"
                           class="w-full h-8 px-2 rounded-md bg-background text-foreground border text-xs"
-                          placeholder="UTC offset"
+                          placeholder={t('placeholder_utc_offset', {}, 'UTC offset')}
                         />
                       </div>
                       <div class="space-y-1">
@@ -1080,7 +960,7 @@
                         </div>
                         <Textarea
                           class="w-full min-h-20 px-2 py-1 text-xs resize-none"
-                          placeholder="Additional notes..."
+                          placeholder={t('placeholder_notes', {}, 'Additional notes...')}
                         ></Textarea>
                       </div>
                     </div>
@@ -1428,8 +1308,7 @@
           <div class="h-full min-w-0 rounded-md border bg-card text-card-foreground shadow-sm p-4 flex flex-col overflow-hidden">
             <div class="flex-1 min-h-0 overflow-y-auto">
               {#if selectedSettingsSection === 'jazyk'}
-                <!-- Jazyk (Language) -->
-                <h3 class="text-sm font-semibold mb-4">Jazyk</h3>
+                <h3 class="text-sm font-semibold mb-4">{t('section_jazyk', {}, 'Language')}</h3>
                 <div class="space-y-4 max-w-md">
                   <div class="space-y-2">
                     <label class="block text-sm font-medium opacity-90" for="settings-lang">{t('language', {}, 'Language')}</label>
@@ -1440,7 +1319,7 @@
                         </Select.Trigger>
                         <Select.Content>
                           <Select.Group>
-                            <Select.Label>Languages</Select.Label>
+                            <Select.Label>{t('label_languages', {}, 'Languages')}</Select.Label>
                             {#each languages as lang (lang.value)}
                               <Select.Item value={lang.value} label={lang.label}>
                                 {lang.label}
@@ -1453,37 +1332,35 @@
                   </div>
                 </div>
               {:else if selectedSettingsSection === 'lokace'}
-                <!-- Lokace (Location) -->
-                <h3 class="text-sm font-semibold mb-4">Lokace</h3>
+                <h3 class="text-sm font-semibold mb-4">{t('section_lokace', {}, 'Location')}</h3>
                 <div class="space-y-4 max-w-md">
                   <div class="space-y-2">
-                    <div class="block text-sm font-medium opacity-90">Výchozí lokace</div>
+                    <div class="block text-sm font-medium opacity-90">{t('default_location', {}, 'Default location')}</div>
                     <Input
                       type="text"
                       class="w-full h-9 px-3 rounded-md bg-background text-foreground border"
-                      placeholder="Zadejte výchozí lokaci..."
+                      placeholder={t('placeholder_default_location', {}, 'Enter default location...')}
                     />
                   </div>
                   <div class="space-y-2">
-                    <div class="block text-sm font-medium opacity-90">Zeměpisná šířka</div>
+                    <div class="block text-sm font-medium opacity-90">{t('current_info_latitude', {}, 'Latitude')}</div>
                     <Input
                       type="text"
                       class="w-full h-9 px-3 rounded-md bg-background text-foreground border"
-                      placeholder="Latitude"
+                      placeholder={t('placeholder_latitude', {}, 'Latitude')}
                     />
                   </div>
                   <div class="space-y-2">
-                    <div class="block text-sm font-medium opacity-90">Zeměpisná délka</div>
+                    <div class="block text-sm font-medium opacity-90">{t('current_info_longitude', {}, 'Longitude')}</div>
                     <Input
                       type="text"
                       class="w-full h-9 px-3 rounded-md bg-background text-foreground border"
-                      placeholder="Longitude"
+                      placeholder={t('placeholder_longitude', {}, 'Longitude')}
                     />
                   </div>
                 </div>
               {:else if selectedSettingsSection === 'system_domu'}
-                <!-- Systém domů (House System) -->
-                <h3 class="text-sm font-semibold mb-4">Systém domů</h3>
+                <h3 class="text-sm font-semibold mb-4">{t('section_system_domu', {}, 'House system')}</h3>
                 <div class="space-y-4 max-w-md">
                   <div class="space-y-2">
                     <div class="block text-sm font-medium opacity-90">{t('house_system', {}, 'House System')}</div>
@@ -1506,19 +1383,18 @@
                   </div>
                 </div>
               {:else if selectedSettingsSection === 'nastaveni_aspektu'}
-                <!-- Nastavení aspektů (Aspect Settings) -->
-                <h3 class="text-sm font-semibold mb-4">Nastavení aspektů</h3>
+                <h3 class="text-sm font-semibold mb-4">{t('section_nastaveni_aspektu', {}, 'Aspect settings')}</h3>
                 <div class="space-y-4 max-w-md">
                   <div class="space-y-2">
-                    <div class="block text-sm font-medium opacity-90">Výchozí aspekty</div>
+                    <div class="block text-sm font-medium opacity-90">{t('default_aspects', {}, 'Default aspects')}</div>
                     <div class="space-y-2">
                       {#each [
-                        { id: 'conjunction', label: 'Conjunction (☌)', defaultOrb: 8 },
-                        { id: 'sextile', label: 'Sextile (*)', defaultOrb: 6 },
-                        { id: 'square', label: 'Square (□)', defaultOrb: 8 },
-                        { id: 'trine', label: 'Trine (△)', defaultOrb: 8 },
-                        { id: 'quincunx', label: 'Quincunx (∠)', defaultOrb: 3 },
-                        { id: 'opposition', label: 'Opposition (☍)', defaultOrb: 8 }
+                        { id: 'conjunction', labelKey: 'aspect_conjunction', defaultOrb: 8 },
+                        { id: 'sextile', labelKey: 'aspect_sextile', defaultOrb: 6 },
+                        { id: 'square', labelKey: 'aspect_square', defaultOrb: 8 },
+                        { id: 'trine', labelKey: 'aspect_trine', defaultOrb: 8 },
+                        { id: 'quincunx', labelKey: 'aspect_quincunx', defaultOrb: 3 },
+                        { id: 'opposition', labelKey: 'aspect_opposition', defaultOrb: 8 }
                       ] as aspect}
                         <div class="flex items-center justify-between">
                           <label class="flex items-center gap-2 cursor-pointer">
@@ -1527,7 +1403,7 @@
                               class="w-4 h-4 rounded border border-foreground/30 bg-background text-primary focus:ring-2 focus:ring-primary focus:ring-offset-2 cursor-pointer"
                               checked={true}
                             />
-                            <span class="text-sm">{aspect.label}</span>
+                            <span class="text-sm">{t(aspect.labelKey, {}, aspect.labelKey)}</span>
                           </label>
                           <Input
                             type="number"
@@ -1543,8 +1419,7 @@
                   </div>
                 </div>
               {:else if selectedSettingsSection === 'vzhled'}
-                <!-- Vzhled (Appearance) -->
-                <h3 class="text-sm font-semibold mb-4">Vzhled</h3>
+                <h3 class="text-sm font-semibold mb-4">{t('section_vzhled', {}, 'Appearance')}</h3>
                 <div class="flex flex-wrap items-start gap-6">
                   <div class="space-y-2 w-full sm:w-auto sm:min-w-[240px]">
                     <label class="block text-sm font-medium opacity-90" for="settings-preset">Color preset</label>
@@ -1600,13 +1475,40 @@
                       Reset glyph cache
                     </Button>
                   </div>
+                  <div class="space-y-2 w-full sm:w-auto sm:min-w-[240px]">
+                    <div class="block text-sm font-medium opacity-90">Radix chart – element colors</div>
+                    <p class="text-xs text-muted-foreground max-w-[260px]">Water, Air, Earth, Fire (zodiac/house ring)</p>
+                    <div class="flex flex-wrap gap-3 items-center">
+                      {#each [
+                        { key: 'element-fire' as ElementColorKey, labelKey: 'element_fire' },
+                        { key: 'element-earth' as ElementColorKey, labelKey: 'element_earth' },
+                        { key: 'element-air' as ElementColorKey, labelKey: 'element_air' },
+                        { key: 'element-water' as ElementColorKey, labelKey: 'element_water' }
+                      ] as elem}
+                        <div class="flex items-center gap-2">
+                          <label class="text-xs opacity-90">{t(elem.labelKey, {}, elem.labelKey)}</label>
+                          <input
+                            type="color"
+                            value={elementColors[elem.key]}
+                            oninput={(e) => {
+                              const v = (e.currentTarget as HTMLInputElement).value;
+                              elementColors = { ...elementColors, [elem.key]: v };
+                              setElementColor(elem.key, v);
+                              settingsChanged = true;
+                            }}
+                            class="w-9 h-9 rounded border border-border cursor-pointer"
+                            aria-label={t(elem.labelKey, {}, elem.labelKey)}
+                          />
+                        </div>
+                      {/each}
+                    </div>
+                  </div>
                   <div class="w-full min-w-0 flex-1 mt-4 sm:mt-0">
                     <GlyphManager embedded={true} />
                   </div>
                 </div>
               {:else if selectedSettingsSection === 'manual'}
-                <!-- Manuál (Manual) -->
-                <h3 class="text-sm font-semibold mb-4">Manuál</h3>
+                <h3 class="text-sm font-semibold mb-4">{t('section_manual', {}, 'Manual')}</h3>
                 <div class="space-y-4 max-w-2xl">
                   <div class="prose prose-sm dark:prose-invert max-w-none">
                     <p class="text-sm opacity-85">
@@ -1647,7 +1549,7 @@
   {:else if mode === 'radix_table'}
     <!-- Left 20% (1 panel) + middle stretched to 80% -->
     <section class="row-span-1 grid gap-x-3 gap-y-3 px-3 pb-3 overflow-hidden w-full" style:grid-template-columns="minmax(0,20%) minmax(0,80%)">
-      <div class="h-full min-w-0 flex flex-col gap-2 min-h-0">
+      <div class="h-full min-w-0 flex flex-col gap-2 min-h-0 bg-panel rounded-md overflow-hidden">
         <div class="min-h-0" class:flex-1={leftTopExpanded}>
           <ExpandablePanel title={t('table_tools', {}, 'Table Tools')} bind:expanded={leftTopExpanded}>
             {#snippet children()}
@@ -1674,70 +1576,18 @@
       <!-- Left column: stack two panels (removed Transits panel) -->
       {#if isTransitsView}
         <!-- Transits mode: only show transits selector -->
-        <div class="h-full min-w-0 flex flex-col gap-2 min-h-0">
+        <div class="h-full min-w-0 flex flex-col gap-2 min-h-0 bg-panel rounded-md overflow-hidden">
           <div class="min-h-0" class:flex-1={leftMiddleExpanded}>
             <ExpandablePanel title={t('transits', {}, 'Transits')} bind:expanded={leftMiddleExpanded}>
               {#snippet children()}
-                <div class="space-y-1 text-sm max-h-full overflow-y-auto pr-1">
-                  <!-- Obecné -->
-                  <Button
-                    type="button"
-                    class={`w-full text-left px-2 py-1.5 text-sm rounded-md transition-colors ${
-                      selectedTransitsSection === 'obecne'
-                        ? 'font-semibold underline underline-offset-4 text-foreground bg-primary/10'
-                        : 'text-foreground/80 hover:bg-primary hover:text-primary-foreground'
-                    }`}
-                    onclick={() => selectedTransitsSection = 'obecne'}
-                  >
-                    Obecné
-                  </Button>
-                  
-                  <!-- Tranzitující tělesa -->
-                  <Button
-                    type="button"
-                    class={`w-full text-left px-2 py-1.5 text-sm rounded-md transition-colors ${
-                      selectedTransitsSection === 'transiting'
-                        ? 'font-semibold underline underline-offset-4 text-foreground bg-primary/10'
-                        : 'text-foreground/80 hover:bg-primary hover:text-primary-foreground'
-                    }`}
-                    onclick={() => selectedTransitsSection = 'transiting'}
-                  >
-                    Tranzitující tělesa
-                  </Button>
-                  
-                  <!-- Tranzitovaná tělesa -->
-                  <Button
-                    type="button"
-                    class={`w-full text-left px-2 py-1.5 text-sm rounded-md transition-colors ${
-                      selectedTransitsSection === 'transited'
-                        ? 'font-semibold underline underline-offset-4 text-foreground bg-primary/10'
-                        : 'text-foreground/80 hover:bg-primary hover:text-primary-foreground'
-                    }`}
-                    onclick={() => selectedTransitsSection = 'transited'}
-                  >
-                    Tranzitovaná tělesa
-                  </Button>
-                  
-                  <!-- Použité aspekty -->
-                  <Button
-                    type="button"
-                    class={`w-full text-left px-2 py-1.5 text-sm rounded-md transition-colors ${
-                      selectedTransitsSection === 'aspects'
-                        ? 'font-semibold underline underline-offset-4 text-foreground bg-primary/10'
-                        : 'text-foreground/80 hover:bg-primary hover:text-primary-foreground'
-                    }`}
-                    onclick={() => selectedTransitsSection = 'aspects'}
-                  >
-                    Použité aspekty
-                  </Button>
-                </div>
+                <PanelMenu items={transitsMenuItems} bind:selectedId={selectedTransitsSection} />
               {/snippet}
             </ExpandablePanel>
           </div>
         </div>
       {:else}
         <!-- Normal radix view: show chart details and astrolab -->
-        <div class="h-full min-w-0 flex flex-col gap-2 min-h-0">
+        <div class="h-full min-w-0 flex flex-col gap-2 min-h-0 bg-panel rounded-md overflow-hidden">
           <!-- Panel 1: title is current context name -->
           <div class="min-h-0" class:flex-1={leftTopExpanded}>
             <ExpandablePanel 
@@ -1869,7 +1719,7 @@
                   </Select.Root>
                 </div>
                 <div class="space-y-2">
-                  <div class="text-sm font-medium">Časové rozmezí</div>
+                  <div class="text-sm font-medium">{t('time_range', {}, 'Time range')}</div>
                   <div class="grid grid-cols-2 gap-2">
                     <Input
                       type="date"
@@ -1903,21 +1753,21 @@
                 </div>
               </div>
             {:else if selectedTransitsSection === 'transiting'}
-              <h3 class="text-sm font-semibold mb-3">Tranzitující tělesa</h3>
+              <h3 class="text-sm font-semibold mb-3">{t('transits_menu_transiting', {}, 'Transiting bodies')}</h3>
               <BodySelector bind:selectedBodies={transitingBodies} />
             {:else if selectedTransitsSection === 'transited'}
-              <h3 class="text-sm font-semibold mb-3">Tranzitovaná tělesa</h3>
+              <h3 class="text-sm font-semibold mb-3">{t('transits_menu_transited', {}, 'Transited bodies')}</h3>
               <BodySelector bind:selectedBodies={transitedBodies} />
             {:else if selectedTransitsSection === 'aspects'}
-              <h3 class="text-sm font-semibold mb-3">Použité aspekty</h3>
+              <h3 class="text-sm font-semibold mb-3">{t('transits_menu_aspects_used', {}, 'Aspects used')}</h3>
               <div class="space-y-2">
                 {#each [
-                  { id: 'conjunction', label: 'Conjunction (☌)' },
-                  { id: 'sextile', label: 'Sextile (*)' },
-                  { id: 'square', label: 'Square (□)' },
-                  { id: 'trine', label: 'Trine (△)' },
-                  { id: 'quincunx', label: 'Quincunx (∠)' },
-                  { id: 'opposition', label: 'Opposition (☍)' }
+                  { id: 'conjunction', labelKey: 'aspect_conjunction' },
+                  { id: 'sextile', labelKey: 'aspect_sextile' },
+                  { id: 'square', labelKey: 'aspect_square' },
+                  { id: 'trine', labelKey: 'aspect_trine' },
+                  { id: 'quincunx', labelKey: 'aspect_quincunx' },
+                  { id: 'opposition', labelKey: 'aspect_opposition' }
                 ] as aspect}
                   <label class="flex items-center gap-2 cursor-pointer group hover:opacity-80 transition-opacity">
                     <input
@@ -1932,14 +1782,14 @@
                         }
                       }}
                     />
-                    <span class="text-sm">{aspect.label}</span>
+                    <span class="text-sm">{t(aspect.labelKey, {}, aspect.labelKey)}</span>
                   </label>
                 {/each}
               </div>
             {/if}
           </div>
           {#if transitLoading}
-            <div class="mt-4 text-xs opacity-80">Počítám tranzity...</div>
+            <div class="mt-4 text-xs opacity-80">{t('transit_loading', {}, 'Computing transits…')}</div>
           {/if}
           {#if transitError}
             <div class="mt-4 text-xs text-destructive">{transitError}</div>
@@ -1947,15 +1797,15 @@
           {#if transitSeries.length > 0}
             <div class="mt-4 border-t border-border/60 pt-4">
               <div class="text-xs font-medium opacity-80 mb-2">
-                Výsledky: {transitSeries.length} záznamů
+                {t('transit_results_count', { count: String(transitSeries.length) }, `Results: ${transitSeries.length} entries`)}
               </div>
               <div class="overflow-auto max-h-64 border rounded-md">
                 <table class="w-full text-xs border-collapse">
                   <thead class="sticky top-0 bg-background border-b">
                     <tr>
-                      <th class="text-left p-2 font-semibold opacity-85">Čas</th>
-                      <th class="text-left p-2 font-semibold opacity-85">Tělesa</th>
-                      <th class="text-left p-2 font-semibold opacity-85">Aspekty</th>
+                      <th class="text-left p-2 font-semibold opacity-85">{t('column_time', {}, 'Time')}</th>
+                      <th class="text-left p-2 font-semibold opacity-85">{t('column_bodies', {}, 'Bodies')}</th>
+                      <th class="text-left p-2 font-semibold opacity-85">{t('aspects', {}, 'Aspects')}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1970,7 +1820,7 @@
                 </table>
               </div>
               {#if transitSeries.length > 50}
-                <div class="text-xs opacity-70 mt-2">Zobrazeno prvních 50 záznamů.</div>
+                <div class="text-xs opacity-70 mt-2">{t('transit_showing_first_50', {}, 'Showing first 50 entries.')}</div>
               {/if}
             </div>
           {/if}
@@ -2027,19 +1877,21 @@
 
       <!-- Right panel (hidden for Aspects view and Transits view) -->
       {#if !isAspectsView && !isTransitsView}
-        <div class="h-full min-w-0 flex flex-col gap-2 min-h-0">
+        <div class="h-full min-w-0 flex flex-col gap-2 min-h-0 bg-panel rounded-md overflow-hidden">
           <!-- Poloha: radix view = single column list; other = placeholder -->
           <div class="min-h-0 flex-1 min-w-0">
             <ExpandablePanel title={t('right_panel', {}, 'Poloha')} bind:expanded={rightExpanded}>
               {#snippet children()}
                 {#if isRadixLikeMode}
-                  <!-- Radix: one column = object + position (e.g. "Sun 28°15'") -->
+                  <!-- Radix: object glyph, degrees, house sign glyph, minutes -->
                   <ul class="space-y-0.5 text-[11px] max-h-full overflow-auto pr-1">
                     {#each planetRows as [planetName, planetData]}
                       {@const planetGlyph = getGlyphContent(planetName)}
-                      {@const signDeg = planetData.positionInHouse}
-                      {@const minutes = Math.floor((signDeg % 1) * 60)}
+                      {@const signGlyph = getGlyphContent(planetData.signName)}
+                      {@const deg = Math.floor(planetData.positionInHouse)}
+                      {@const minutes = Math.floor((planetData.positionInHouse % 1) * 60)}
                       <li class="flex items-center gap-1.5 py-0.5 border-b border-border/30 last:border-0">
+                        <!-- Object glyph -->
                         {#if planetGlyph.type === 'svg'}
                           <span class="inline-block flex-shrink-0" style="width: 0.9em; height: 0.9em; vertical-align: middle;">{@html planetGlyph.content}</span>
                         {:else if planetGlyph.type === 'file'}
@@ -2051,8 +1903,20 @@
                         {:else}
                           <span class="flex-shrink-0 w-[0.9em] text-center">{planetGlyph.content || planetName.charAt(0).toUpperCase()}</span>
                         {/if}
-                        <span class="capitalize truncate min-w-0">{planetName.replaceAll('_', ' ')}</span>
-                        <span class="font-mono opacity-80 flex-shrink-0">{Math.floor(signDeg)}° {minutes}'</span>
+                        <span class="font-mono opacity-90 flex-shrink-0">{deg}°</span>
+                        <!-- House sign glyph -->
+                        {#if signGlyph.type === 'svg'}
+                          <span class="inline-block flex-shrink-0" style="width: 0.9em; height: 0.9em; vertical-align: middle;">{@html signGlyph.content}</span>
+                        {:else if signGlyph.type === 'file'}
+                          {#if failedGlyphFiles[`s:${planetName}:${planetData.signName}:${signGlyph.content}`]}
+                            <span class="flex-shrink-0 w-[0.9em] text-center">{signGlyph.fallback}</span>
+                          {:else}
+                            <img src={signGlyph.content} alt={planetData.signName} class="w-[0.9em] h-[0.9em] flex-shrink-0 object-contain" onerror={() => { failedGlyphFiles[`s:${planetName}:${planetData.signName}:${signGlyph.content}`] = true; failedGlyphFiles = { ...failedGlyphFiles }; }} />
+                          {/if}
+                        {:else}
+                          <span class="flex-shrink-0 w-[0.9em] text-center">{signGlyph.content || planetData.signName.slice(0, 2)}</span>
+                        {/if}
+                        <span class="font-mono opacity-90 flex-shrink-0">{minutes}'</span>
                       </li>
                     {/each}
                     {#if planetRows.length === 0}

@@ -68,6 +68,15 @@ const glyphCatalog: Record<
   chiron: { name: 'Chiron', type: 'planet', fallback: 'Ch', size: 24 },
 };
 
+/** Zodiac sign glyph ids in order: Aries 0°, Taurus 30°, ... Pisces 330°. Use for lookups, never hardcoded symbols. */
+export const ZODIAC_SIGN_IDS = ['aries', 'taurus', 'gemini', 'cancer', 'leo', 'virgo', 'libra', 'scorpio', 'sagittarius', 'capricorn', 'aquarius', 'pisces'] as const;
+
+export function signIdFromLongitude(longitude: number): string {
+  const normalized = ((longitude % 360) + 360) % 360;
+  const index = Math.floor(normalized / 30) % 12;
+  return ZODIAC_SIGN_IDS[index] ?? 'aries';
+}
+
 const fileBackedIds = new Set([
   'sun', 'moon', 'mercury', 'venus', 'mars', 'jupiter', 'saturn', 'uranus', 'neptune', 'pluto',
   'aries', 'taurus', 'gemini', 'cancer', 'leo', 'virgo', 'libra', 'scorpio', 'sagittarius', 'capricorn', 'aquarius', 'pisces',

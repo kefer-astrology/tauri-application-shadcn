@@ -20,9 +20,9 @@
   }
 </script>
 
-<div class="w-full flex flex-col max-h-full overflow-hidden rounded-md border shadow-sm" aria-expanded={expanded}>
-  <!-- Header: #002e60 background, expander on left, title, then edit icon -->
-  <div class="flex items-center justify-between px-3 py-2 select-none" style="background-color:#002e60;color:var(--color-primary-foreground,white)">
+<div class="w-full flex flex-col max-h-full overflow-hidden rounded-md border shadow-sm bg-panel text-panel-foreground" aria-expanded={expanded}>
+  <!-- Header: themeable panel header -->
+  <div class="flex items-center justify-between px-3 py-2 select-none bg-panel-header text-primary-foreground">
     <div class="flex items-center gap-2 min-w-0">
       <Button variant="ghost" size="icon" class="h-7 w-7 rounded-sm hover:opacity-85 transition-opacity" onclick={toggle} aria-label="Toggle panel">
         {#if expanded}
@@ -41,8 +41,8 @@
   </div>
 
   {#if expanded}
-    <!-- Body -->
-    <div class="flex-1 min-h-0 overflow-auto bg-background/50 backdrop-blur-sm">
+    <!-- Body: same panel background + white text for consistency -->
+    <div class="flex-1 min-h-0 overflow-auto bg-panel text-panel-foreground">
       <div class="p-3">
         {@render children?.()}
       </div>

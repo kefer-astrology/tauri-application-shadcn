@@ -11,19 +11,20 @@
   import AspectGrid from '$lib/components/AspectGrid.svelte';
   import { effectiveTime, timeNavigation } from '$lib/stores/timeNavigation.svelte';
   import { getCurrentPositions, queryPositions, type Position } from '$lib/stores/data.svelte';
+  import { signIdFromLongitude } from '$lib/stores/glyphs.svelte';
   import { invoke } from '@tauri-apps/api/core';
 
   // reactive references using runes
   const tab = $derived(layout.selectedTab);
   const ctx = $derived(layout.selectedContext);
   const languageLabel = $derived.by(() => t('language', {}, 'Language'));
-  const viewLabel = $derived(() => {
+  const viewLabel = $derived.by(() => {
     return tab === 'Radix'
-      ? 'Radix chart area'
+      ? t('radix_chart_area', {}, 'Radix chart area')
       : tab === 'Aspects'
-      ? 'Aspects table area'
+      ? t('aspects_table_area', {}, 'Aspects table area')
       : tab === 'Transits'
-      ? 'Transits composite area'
+      ? t('transits_composite_area', {}, 'Transits composite area')
       : `${tab} view`;
   });
 
@@ -40,7 +41,7 @@
   // Make langValue reactive to i18n.lang changes
   let langValue = $state(String(i18n.lang));
   const langTriggerContent = $derived(
-    languages.find((l) => l.value === langValue)?.label ?? 'Select language'
+    languages.find((l) => l.value === langValue)?.label ?? t('select_language', {}, 'Select language')
   );
 
   // Sync langValue -> i18n.lang (when user changes select)
@@ -61,7 +62,7 @@
   const presetItems = presets.map((p) => ({ value: p.id, label: p.name }));
   let presetValue = $state(String(preset.id));
   const presetTriggerContent = $derived(
-    presetItems.find((p) => p.value === presetValue)?.label ?? 'Select preset'
+    presetItems.find((p) => p.value === presetValue)?.label ?? t('select_preset', {}, 'Select preset')
   );
 
   $effect(() => {
@@ -109,10 +110,9 @@
   let currentTimestampIndex = $state<number>(-1);
   let zoomLevel = $state<number>(1); // 1 = every timestamp, 2 = every 2nd, etc.
 
-  // Convert Position[] to RadixChart format
+  // Convert Position[] to RadixChart format (sign = glyph id for settings-controlled display)
   const planetPositions = $derived(() => {
     const result: Record<string, { degrees: number; sign: string; house?: number }> = {};
-    const signs = ['♈', '♉', '♊', '♋', '♌', '♍', '♎', '♏', '♐', '♑', '♒', '♓'];
     const defaultBodyOrder = [
       'sun', 'moon', 'mercury', 'venus', 'mars', 'jupiter', 'saturn', 'uranus', 'neptune', 'pluto',
       'asc', 'mc', 'ic', 'desc', 'north_node', 'south_node', 'lilith', 'chiron'
@@ -138,7 +138,6 @@
     const addPosition = (rawName: string, rawLongitude: number) => {
       if (/^house_\d+$/i.test(rawName)) return;
       const longitude = ((rawLongitude % 360) + 360) % 360;
-      const signIndex = Math.floor(longitude / 30);
       let planetName = rawName.toLowerCase()
         .replace(/^planet_/, '')
         .replace(/^body_/, '')
@@ -146,7 +145,7 @@
       planetName = objectIdMap[planetName] || planetName;
       result[planetName] = {
         degrees: longitude,
-        sign: signs[signIndex] || '♈',
+        sign: signIdFromLongitude(longitude),
         house: 1 // TODO: calculate house from position and house cusps
       };
     };
@@ -560,7 +559,7 @@
       <div class="flex-1 min-h-0 flex items-center justify-center" bind:this={contentEl}>
         {#if square > 0}
           {#if isLoadingPositions}
-            <div class="text-sm opacity-60">Loading positions…</div>
+            <div class="text-sm opacity-60">{t('loading_positions', {}, 'Loading positions…')}</div>
           {:else if positionError}
             <div class="text-sm text-destructive opacity-80">
               Error: {positionError}
@@ -584,7 +583,7 @@
             </div>
           {/if}
         {:else}
-          <div class="text-sm opacity-60">Measuring available space…</div>
+          <div class="text-sm opacity-60">{t('measuring_space', {}, 'Measuring available space…')}</div>
         {/if}
       </div>
     {:else if tab === 'Aspects'}
@@ -594,7 +593,7 @@
           {#if square > 0}
             <AspectGrid size={square} />
           {:else}
-            <div class="text-sm opacity-60">Measuring available space…</div>
+            <div class="text-sm opacity-60">{t('measuring_space', {}, 'Measuring available space…')}</div>
           {/if}
         </div>
       </div>
@@ -609,7 +608,7 @@
             </Select.Trigger>
             <Select.Content>
               <Select.Group>
-                <Select.Label>Languages</Select.Label>
+                <Select.Label>{t('label_languages', {}, 'Languages')}</Select.Label>
                 {#each languages as lang (lang.value)}
                   <Select.Item value={lang.value} label={lang.label}>
                     {lang.label}
@@ -623,7 +622,7 @@
 
       <!-- Color preset selector (from imported preset files) -->
       <div class="mb-4 space-y-2">
-        <label class="block text-sm font-medium opacity-90" for="settings-preset">Color preset</label>
+        <label class="block text-sm font-medium opacity-90" for="settings-preset">{t('label_color_preset', {}, 'Color preset')}</label>
         <div class="min-w-[220px]">
           <Select.Root type="single" name="appPreset" bind:value={presetValue}>
             <Select.Trigger class="w-[220px]" id="settings-preset">
@@ -631,7 +630,7 @@
             </Select.Trigger>
             <Select.Content>
               <Select.Group>
-                <Select.Label>Themes</Select.Label>
+                <Select.Label>{t('label_themes', {}, 'Themes')}</Select.Label>
                 {#each presetItems as item (item.value)}
                   <Select.Item value={item.value} label={item.label}>
                     {item.label}
@@ -646,7 +645,7 @@
       <!-- Other tabs: Full layout with toolbar -->
       <div class="flex items-baseline justify-between gap-4 mb-2">
         <h2 class="text-lg font-semibold">{tab}</h2>
-        <div class="text-sm opacity-80">Context: <span class="font-medium">{ctx}</span></div>
+        <div class="text-sm opacity-80">{t('context_label', {}, 'Context')}: <span class="font-medium">{ctx}</span></div>
       </div>
 
       <!-- Top toolbar: search + open chart button -->
@@ -654,14 +653,14 @@
         <Input
           type="text"
           class="h-9 px-3 rounded-md bg-background text-foreground border min-w-[220px]"
-          placeholder="Search…"
+          placeholder={t('search_placeholder', {}, 'Search…')}
           bind:value={searchQuery}
         />
         <Button type="button" variant="outline" class="px-3 py-1.5 text-sm">
-          Search
+          {t('button_search', {}, 'Search')}
         </Button>
         <Button type="button" class="px-3 py-1.5 text-sm" onclick={openChart}>
-          Open chart
+          {t('button_open_chart', {}, 'Open chart')}
         </Button>
       </div>
 
@@ -673,7 +672,7 @@
 
       <!-- Opened contexts list -->
       <div class="mb-3">
-        <div class="text-sm font-medium opacity-85 mb-1">Opened contexts</div>
+        <div class="text-sm font-medium opacity-85 mb-1">{t('opened_contexts', {}, 'Opened contexts')}</div>
         <ul class="space-y-1 max-h-40 overflow-auto pr-1">
           {#each layout.contexts as c}
             <li class="flex items-center justify-between text-sm">
@@ -681,7 +680,7 @@
                 <span class:font-semibold={layout.selectedContext === c.id}>{c.name}</span>
               </Button>
               {#if layout.selectedContext === c.id}
-                <span class="text-xs opacity-70">selected</span>
+                <span class="text-xs opacity-70">{t('selected', {}, 'selected')}</span>
               {/if}
             </li>
           {/each}
@@ -697,7 +696,7 @@
             {viewLabel}
           </div>
         {:else}
-          <div class="text-sm opacity-60">Measuring available space…</div>
+          <div class="text-sm opacity-60">{t('measuring_space', {}, 'Measuring available space…')}</div>
         {/if}
       </div>
     {/if}

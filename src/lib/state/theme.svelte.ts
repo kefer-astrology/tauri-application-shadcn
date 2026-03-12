@@ -40,6 +40,54 @@ export type ThemePreset = {
 };
 
 const PRESET_STORAGE_KEY = 'theme_preset';
+const ELEMENT_COLORS_STORAGE_KEY = 'theme_element_colors';
+
+export type ElementColorKey = 'element-fire' | 'element-earth' | 'element-air' | 'element-water';
+
+const ELEMENT_COLOR_KEYS: ElementColorKey[] = ['element-fire', 'element-earth', 'element-air', 'element-water'];
+
+const DEFAULT_ELEMENT_COLORS: Record<ElementColorKey, string> = {
+  'element-fire': '#5a5a64',
+  'element-earth': '#4a3f35',
+  'element-air': '#1e3d38',
+  'element-water': '#5c2a2a',
+};
+
+function loadElementColors(): Record<ElementColorKey, string> {
+  try {
+    const raw = localStorage.getItem(ELEMENT_COLORS_STORAGE_KEY);
+    if (!raw) return { ...DEFAULT_ELEMENT_COLORS };
+    const parsed = JSON.parse(raw) as Record<string, string>;
+    const out = { ...DEFAULT_ELEMENT_COLORS };
+    for (const k of ELEMENT_COLOR_KEYS) {
+      if (typeof parsed[k] === 'string') out[k] = parsed[k];
+    }
+    return out;
+  } catch {
+    return { ...DEFAULT_ELEMENT_COLORS };
+  }
+}
+
+function applyElementColors() {
+  const root = document.documentElement;
+  const colors = loadElementColors();
+  for (const [k, v] of Object.entries(colors)) {
+    root.style.setProperty(`--${k}`, v);
+  }
+}
+
+export function setElementColor(key: ElementColorKey, value: string) {
+  const colors = loadElementColors();
+  colors[key] = value;
+  document.documentElement.style.setProperty(`--${key}`, value);
+  try {
+    localStorage.setItem(ELEMENT_COLORS_STORAGE_KEY, JSON.stringify(colors));
+  } catch {}
+}
+
+export function getElementColors(): Record<ElementColorKey, string> {
+  return loadElementColors();
+}
 
 import { presetsFromFiles } from '$lib/themes/presets';
 export const presets: ThemePreset[] = presetsFromFiles;
@@ -71,6 +119,7 @@ export function applyPreset(id: string) {
   const found = presets.find((p) => p.id === id) ?? presets[0];
   preset.id = found.id;
   applyForCurrentMode(found);
+  applyElementColors(); // re-apply user element colors on top of preset
   try { localStorage.setItem(PRESET_STORAGE_KEY, found.id); } catch {}
 }
 
@@ -78,4 +127,8 @@ export function applyPreset(id: string) {
 export function reapplyCurrentPreset() {
   const current = presets.find((p) => p.id === preset.id) ?? presets[0];
   applyForCurrentMode(current);
+  applyElementColors();
 }
+
+// Apply stored element colors on load (after presets are loaded)
+applyElementColors();
